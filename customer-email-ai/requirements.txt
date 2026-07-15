@@ -1,0 +1,5 @@
+spacy>=3.8.0
+en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
+beautifulsoup4>=4.12.3
+phonenumbers>=8.13.46
+rapidfuzz>=3.14.0
