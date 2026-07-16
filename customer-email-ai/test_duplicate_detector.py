@@ -5,7 +5,7 @@ This harness provides a mix of exact and fuzzy record scenarios.
 
 from __future__ import annotations
 
-from duplicate_detector import detect_duplicates
+from duplicate_detector import detect_duplicates, normalize_email, normalize_mobile
 
 
 TEST_RECORDS = [
@@ -50,7 +50,7 @@ TEST_RECORDS = [
         "designation": "Purchase Manager",
     },
     {
-        "contact_person_name": "Danielle Lee",
+        "contact_person_name": "Daniel Le",
         "email_id": "danielle.lee@northwindretail.com",
         "organisation_name": "Northwind Retail",
         "mobile_number": "+1 555 987 1111",
@@ -129,6 +129,14 @@ TEST_RECORDS = [
         "address": "12 Harbor Street, Boston, MA",
         "designation": "System Administrator",
     },
+    {
+        "contact_person_name": "",
+        "email_id": "",
+        "organisation_name": "",
+        "mobile_number": "",
+        "address": "",
+        "designation": "",
+    },
 ]
 
 
@@ -138,8 +146,19 @@ def _assert_status(results: list[dict[str, object]], expected_statuses: list[str
         assert result["duplicate_status"] == expected_status, result
 
 
-def main() -> None:
-    """Run the duplicate detection test data and assert representative outcomes."""
+def test_normalize_email_removes_spaces_and_lowercases() -> None:
+    """Email normalization removes internal spaces and lowercases the value."""
+    assert normalize_email(" Sarah @AcmeSolutions.COM ") == "sarah@acmesolutions.com"
+
+
+def test_normalize_mobile_uses_last_10_digits() -> None:
+    """Mobile normalization removes separators and compares the last 10 digits."""
+    assert normalize_mobile("+91 98765-43210") == "9876543210"
+    assert normalize_mobile("+1 555 765 4321") == "5557654321"
+
+
+def test_detect_duplicates_for_sample_customer_records() -> None:
+    """Detect exact duplicates, fuzzy duplicates, unique records, and blanks."""
     results = detect_duplicates(TEST_RECORDS)
     _assert_status(results, [
         "Duplicate",
@@ -154,6 +173,72 @@ def main() -> None:
         "Possible Duplicate",
         "Duplicate",
         "Duplicate",
+        "Unique",
+        "Unique",
+        "Unique",
+        "Unique",
+    ])
+
+    assert len(results) == 16
+    assert results[0]["mobile_number"] == "+91 98765 43210"
+    assert results[0]["normalized_phone"] == "9876543210"
+    assert all("confidence_score" in result for result in results)
+    assert all(
+        result["confidence_score"] == 100
+        for result in results
+        if result["duplicate_status"] == "Duplicate"
+    )
+    assert all(
+        result["confidence_score"] >= 85
+        for result in results
+        if result["duplicate_status"] == "Possible Duplicate"
+    )
+    assert all(
+        result["confidence_score"] == 0
+        for result in results
+        if result["duplicate_status"] == "Unique"
+    )
+
+
+def test_detect_duplicates_rejects_invalid_input() -> None:
+    """Invalid input raises clear errors."""
+    try:
+        detect_duplicates("not a list")  # type: ignore[arg-type]
+    except TypeError:
+        pass
+    else:
+        raise AssertionError("TypeError was not raised for non-list input")
+
+    try:
+        detect_duplicates([{"email_id": "missing-fields@example.com"}])
+    except KeyError:
+        pass
+    else:
+        raise AssertionError("KeyError was not raised for missing record fields")
+
+
+def main() -> None:
+    """Run the duplicate detection test data and assert representative outcomes."""
+    test_normalize_email_removes_spaces_and_lowercases()
+    test_normalize_mobile_uses_last_10_digits()
+    test_detect_duplicates_for_sample_customer_records()
+    test_detect_duplicates_rejects_invalid_input()
+
+    results = detect_duplicates(TEST_RECORDS)
+    _assert_status(results, [
+        "Duplicate",
+        "Duplicate",
+        "Duplicate",
+        "Duplicate",
+        "Possible Duplicate",
+        "Possible Duplicate",
+        "Possible Duplicate",
+        "Possible Duplicate",
+        "Possible Duplicate",
+        "Possible Duplicate",
+        "Duplicate",
+        "Duplicate",
+        "Unique",
         "Unique",
         "Unique",
         "Unique",

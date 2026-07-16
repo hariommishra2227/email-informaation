@@ -30,7 +30,63 @@ LOGGER = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
 
 EMAIL_PATTERN = re.compile(r"(?P<email>[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})")
-PHONE_PATTERN = re.compile(r"(?<!\w)(?:\+|00)?\d{1,3}[\s().-]?\d{3}[\s().-]?\d{4,5}(?!\w)")
+PHONE_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9])"
+    r"(?:\+?\d{1,3}[\s.-]?)?"
+    r"(?:\(?\d{2,5}\)?[\s.-]?){1,4}"
+    r"\d{2,5}"
+    r"(?![A-Za-z0-9])"
+)
+PERSON_NAME_PATTERN = re.compile(r"^[A-Z][A-Za-z'\-.]+(?:\s+[A-Z][A-Za-z'\-.]+)+$")
+COMPANY_HINT_PATTERN = re.compile(
+    r"\b(?:company|companies|organization|organisation|solutions|technologies|systems|software|services|industries|ventures|logistics|telecom|retail|group|ltd|limited|pvt|private|inc|llc|corp|corporation)\b",
+    re.IGNORECASE,
+)
+COMPANY_HINT_KEYWORDS = (
+    "ltd",
+    "pvt",
+    "private",
+    "limited",
+    "technologies",
+    "solutions",
+    "systems",
+    "software",
+    "services",
+    "industries",
+    "ventures",
+    "logistics",
+    "telecom",
+    "retail",
+    "company",
+    "organization",
+    "organisation",
+)
+PHONE_LABEL_KEYWORDS = (
+    "mobile",
+    "phone",
+    "contact",
+    "tel",
+    "telephone",
+    "cell",
+    "whatsapp",
+)
+PHONE_DISPLAY_CLEANUP_PATTERN = re.compile(r"\s+")
+NORMALIZED_PHONE_PATTERN = re.compile(r"\D")
+NON_PHONE_KEYWORDS = (
+    "invoice",
+    "order",
+    "gst",
+    "pin",
+    "pincode",
+    "postal",
+    "zip",
+    "date",
+    "due",
+    "amount",
+    "bill",
+    "quotation",
+    "quote",
+)
 ADDRESS_KEYWORDS = (
     "street",
     "road",
@@ -50,18 +106,23 @@ ADDRESS_KEYWORDS = (
 )
 
 DESIGNATION_KEYWORDS: dict[str, str] = {
-    "manager": "Manager",
     "it manager": "IT Manager",
     "purchase manager": "Purchase Manager",
     "project manager": "Project Manager",
-    "director": "Director",
-    "ceo": "CEO",
-    "cto": "CTO",
-    "cio": "CIO",
     "system administrator": "System Administrator",
     "network engineer": "Network Engineer",
     "sales manager": "Sales Manager",
     "business development manager": "Business Development Manager",
+    "administrator": "Administrator",
+    "consultant": "Consultant",
+    "executive": "Executive",
+    "engineer": "Engineer",
+    "analyst": "Analyst",
+    "director": "Director",
+    "manager": "Manager",
+    "ceo": "CEO",
+    "cto": "CTO",
+    "cio": "CIO",
 }
 
 
@@ -115,6 +176,15 @@ class EmailExtractionEngine:
         """Return cleaned, non-empty lines from a text blob."""
         return [self._clean_text(line) for line in text.splitlines() if self._clean_text(line)]
 
+    def _looks_like_company(self, candidate: str) -> bool:
+        """Return whether a candidate line looks like a company or organisation."""
+        if not candidate:
+            return False
+        lowered = candidate.lower()
+        if any(keyword in lowered for keyword in COMPANY_HINT_KEYWORDS):
+            return True
+        return bool(COMPANY_HINT_PATTERN.search(candidate))
+
     def extract_email_addresses(self, text: str) -> list[str]:
         """Extract unique email addresses from the supplied text."""
         if not text:
@@ -127,66 +197,184 @@ class EmailExtractionEngine:
             return []
 
     def _normalize_phone_number(self, raw_number: str) -> str:
-        """Validate and normalize the candidate phone number."""
-        if not raw_number or phonenumbers is None:
+        """Validate and normalize the candidate phone number for duplicate checks."""
+        if not raw_number:
             return ""
 
-        cleaned_number = re.sub(r"\s+", "", raw_number)
-        try:
-            parsed_number = phonenumbers.parse(cleaned_number, None)
-            if not phonenumbers.is_valid_number(parsed_number):
-                return ""
-            return phonenumbers.format_number(parsed_number, phonenumbers.PhoneNumberFormat.E164)
-        except phonenumbers.NumberParseException:
+        cleaned_number = re.sub(r"[^\d+]", "", raw_number)
+        if cleaned_number.startswith("00"):
+            cleaned_number = f"+{cleaned_number[2:]}"
+
+        digit_count = len(re.sub(r"\D", "", cleaned_number))
+        if digit_count < 10 or digit_count > 15:
             return ""
+
+        if phonenumbers is None:
+            digits = re.sub(r"\D", "", cleaned_number)
+            if cleaned_number.startswith("+"):
+                return f"+{digits}"
+            if digits.startswith("0") and len(digits) == 11:
+                digits = digits[1:]
+            if len(digits) == 10:
+                return f"+91{digits}"
+            return f"+{digits}"
+
+        parse_regions: tuple[str | None, ...] = (None,) if cleaned_number.startswith("+") else ("IN", None)
+        for region in parse_regions:
+            try:
+                parsed_number = phonenumbers.parse(cleaned_number, region)
+                if not phonenumbers.is_valid_number(parsed_number):
+                    continue
+                return phonenumbers.format_number(parsed_number, phonenumbers.PhoneNumberFormat.E164)
+            except phonenumbers.NumberParseException:
+                continue
+
+        return ""
+
+    def _format_phone_number_for_display(self, raw_number: str) -> str:
+        """Return a readable phone number while preserving country-code notation."""
+        cleaned = raw_number.strip(" .,:;|")
+        cleaned = PHONE_DISPLAY_CLEANUP_PATTERN.sub(" ", cleaned)
+        cleaned = re.sub(r"\s*-\s*", "-", cleaned)
+        return cleaned
+
+    def _normalize_phone_for_duplicate_check(self, phone_number: str) -> str:
+        """Return the phone key used by duplicate detection."""
+        digits = NORMALIZED_PHONE_PATTERN.sub("", phone_number)
+        if digits.startswith("91") and len(digits) > 10:
+            digits = digits[2:]
+        if digits.startswith("0") and len(digits) == 11:
+            digits = digits[1:]
+        if len(digits) >= 10:
+            return digits[-10:]
+        return digits
+
+    def _line_has_phone_label(self, line: str) -> bool:
+        """Return whether a line contains a customer contact label."""
+        lowered_line = line.lower()
+        return any(keyword in lowered_line for keyword in PHONE_LABEL_KEYWORDS)
+
+    def _line_has_non_phone_signal(self, line: str) -> bool:
+        """Return whether a line likely contains an ID, date, PIN, or invoice value."""
+        lowered_line = line.lower()
+        return any(keyword in lowered_line for keyword in NON_PHONE_KEYWORDS)
+
+    def _collect_phone_candidates(self, lines: list[str], prefer_labelled: bool) -> list[str]:
+        """Collect regex phone candidates from labelled or general text lines."""
+        candidates: list[str] = []
+
+        for line in lines:
+            has_label = self._line_has_phone_label(line)
+            if prefer_labelled and not has_label:
+                continue
+            if not prefer_labelled and (has_label or self._line_has_non_phone_signal(line)):
+                continue
+
+            searchable_line = line
+            if has_label and ":" in searchable_line:
+                searchable_line = searchable_line.split(":", 1)[1]
+
+            candidates.extend(match.group().strip(" .,:;|") for match in PHONE_PATTERN.finditer(searchable_line))
+
+        return candidates
 
     def extract_mobile_numbers(self, text: str) -> list[str]:
-        """Extract phone numbers from phone-related lines and normalize them."""
+        """Extract display-ready phone numbers from phone-related lines."""
         if not text:
             return []
 
         try:
-            phones: list[str] = []
-            for line in self._iter_lines(text):
-                lowered_line = line.lower()
-                if any(keyword in lowered_line for keyword in ("phone", "mobile", "tel", "telephone", "contact")):
-                    phones.extend(PHONE_PATTERN.findall(line))
+            lines = self._iter_lines(text)
+            phones = self._collect_phone_candidates(lines, prefer_labelled=True)
+            if not phones:
+                phones = self._collect_phone_candidates(lines, prefer_labelled=False)
 
-            normalized_numbers: list[str] = []
+            display_numbers: list[str] = []
             for candidate in phones:
-                candidate = candidate.strip()
-                if len(re.sub(r"\D", "", candidate)) < 8:
-                    continue
                 normalized = self._normalize_phone_number(candidate)
                 if normalized:
-                    normalized_numbers.append(normalized)
+                    display_numbers.append(self._format_phone_number_for_display(candidate))
 
-            return list(dict.fromkeys(normalized_numbers))
+            return list(dict.fromkeys(display_numbers))
         except Exception as exc:
             LOGGER.exception("Mobile number extraction failed: %s", exc)
             return []
 
+    def _looks_like_person_name(self, candidate: str) -> bool:
+        """Return whether a candidate line resembles a person name."""
+        if not candidate:
+            return False
+        if len(candidate.split()) < 2:
+            return False
+        lowered = candidate.lower()
+        if self._looks_like_company(candidate):
+            return False
+        if any(keyword in lowered for keyword in ("@", "http", "mobile", "phone", "tel", "contact", "address", "location", "subject", "customer", "sample", "email")):
+            return False
+        return bool(PERSON_NAME_PATTERN.fullmatch(candidate.strip()))
+
     def extract_contact_person_name(self, text: str) -> str:
-        """Extract a likely contact person's name with conservative heuristics."""
+        """Extract a likely contact person's name with tolerant heuristics."""
         if not text:
             return ""
 
         try:
             lines = self._iter_lines(text)
+            email_indices = [index for index, line in enumerate(lines) if EMAIL_PATTERN.search(line)]
+            designation_indices = [
+                index
+                for index, line in enumerate(lines)
+                if any(keyword in line.lower() for keyword in DESIGNATION_KEYWORDS)
+            ]
 
-            for line in lines:
-                for prefix in ("my name is ", "this is ", "i am "):
-                    if line.lower().startswith(prefix):
-                        candidate = line[len(prefix):].strip()
-                        if re.fullmatch(r"[A-Z][A-Za-z'\-.]+(?:\s+[A-Z][A-Za-z'\-.]+)+", candidate):
-                            return candidate
-
+            name_candidates: list[str] = []
             for index, line in enumerate(lines):
                 lowered_line = line.lower()
-                if any(keyword in lowered_line for keyword in ("best regards", "regards", "thanks", "thank you", "sincerely", "kind regards", "warm regards")) and index + 1 < len(lines):
-                    candidate = lines[index + 1]
-                    if re.fullmatch(r"[A-Z][A-Za-z'\-.]+(?:\s+[A-Z][A-Za-z'\-.]+)+", candidate):
-                        return candidate
+                if lowered_line.startswith("subject:"):
+                    continue
+                if any(keyword in lowered_line for keyword in ("best regards", "regards", "thanks", "thank you", "sincerely", "kind regards", "warm regards")):
+                    continue
+                if self._looks_like_person_name(line):
+                    name_candidates.append((index, line))
+
+            for index, line in name_candidates:
+                if designation_indices and index > max(designation_indices):
+                    continue
+                if index in email_indices:
+                    continue
+                if any(index == other_index - 1 for other_index in email_indices):
+                    continue
+                if any(address_keyword in line.lower() for address_keyword in ("address", "location", "office", "city", "state", "country")):
+                    continue
+                if any(keyword in line.lower() for keyword in ("customer", "sample", "email", "subject")):
+                    continue
+
+                if designation_indices and any(index < designation_index for designation_index in designation_indices):
+                    return line
+
+            for line in lines:
+                lowered_line = line.lower()
+                if lowered_line.startswith("subject:"):
+                    continue
+                if any(keyword in lowered_line for keyword in ("sample", "customer", "email")):
+                    continue
+                if self._looks_like_person_name(line):
+                    return line
+
+            for line in lines:
+                lowered_line = line.lower()
+                if lowered_line.startswith("subject:"):
+                    continue
+                if any(keyword in lowered_line for keyword in ("customer", "sample", "email")):
+                    continue
+                if self._looks_like_company(line):
+                    continue
+                if "@" in lowered_line:
+                    continue
+                if any(keyword in lowered_line for keyword in ("mobile", "phone", "tel", "address", "location")):
+                    continue
+                if self._looks_like_person_name(line):
+                    return line
 
             if self.nlp is None:
                 return ""
@@ -195,11 +383,25 @@ class EmailExtractionEngine:
             for ent in doc.ents:
                 if ent.label_ == "PERSON":
                     candidate = ent.text.strip()
-                    if len(candidate.split()) >= 2 and re.fullmatch(r"[A-Z][A-Za-z'\-.]+(?:\s+[A-Z][A-Za-z'\-.]+)+", candidate):
+                    if self._looks_like_person_name(candidate):
                         return candidate
             return ""
         except Exception as exc:
             LOGGER.exception("Contact person extraction failed: %s", exc)
+            return ""
+
+    def extract_subject(self, text: str) -> str:
+        """Extract a subject line from a business email if present."""
+        if not text:
+            return ""
+
+        try:
+            match = re.search(r"(?im)^\s*subject\s*:\s*(.+)$", text)
+            if match:
+                return self._clean_text(match.group(1))
+            return ""
+        except Exception as exc:
+            LOGGER.exception("Subject extraction failed: %s", exc)
             return ""
 
     def extract_organisation_name(self, text: str) -> str:
@@ -209,8 +411,16 @@ class EmailExtractionEngine:
 
         try:
             lines = self._iter_lines(text)
-            for line in lines:
+            email_indices = [index for index, line in enumerate(lines) if EMAIL_PATTERN.search(line)]
+
+            for index, line in enumerate(lines):
                 lowered_line = line.lower()
+                if index in email_indices and index > 0:
+                    candidate = lines[index - 1]
+                    if self._looks_like_company(candidate):
+                        return candidate
+                if EMAIL_PATTERN.search(line):
+                    continue
                 if " at " in lowered_line and any(keyword in lowered_line for keyword in ("manager", "director", "ceo", "cto", "cio", "administrator", "engineer", "sales", "business development")):
                     match = re.search(r"\bat\s+([A-Z][A-Za-z0-9&.'\-\s]+)", line)
                     if match:
@@ -219,6 +429,16 @@ class EmailExtractionEngine:
                     return line[5:].strip()
                 if lowered_line.startswith("work at "):
                     return line[8:].strip()
+                if lowered_line.startswith("company:"):
+                    return line.split(":", 1)[1].strip()
+                if lowered_line.startswith("organization:"):
+                    return line.split(":", 1)[1].strip()
+                if lowered_line.startswith("organisation:"):
+                    return line.split(":", 1)[1].strip()
+                if lowered_line.startswith("company ") or lowered_line.startswith("organization "):
+                    return line.split(maxsplit=1)[1].strip()
+                if self._looks_like_company(line) and len(line.split()) >= 2 and not self._looks_like_person_name(line):
+                    return line
 
             if self.nlp is None:
                 return ""
@@ -233,17 +453,35 @@ class EmailExtractionEngine:
             return ""
 
     def extract_address(self, text: str) -> str:
-        """Extract a probable address from address-like lines only."""
+        """Extract a probable address or location from business email text."""
         if not text:
             return ""
 
         try:
+            for line in self._iter_lines(text):
+                lowered_line = line.lower()
+                if lowered_line.startswith("address:"):
+                    return line.split(":", 1)[1].strip()
+                if lowered_line.startswith("location:"):
+                    return line.split(":", 1)[1].strip()
+                if lowered_line.startswith("office:"):
+                    return line.split(":", 1)[1].strip()
+
             address_candidates: list[str] = []
             for line in self._iter_lines(text):
                 lowered_line = line.lower()
+                if any(keyword in lowered_line for keyword in ("address", "location", "office", "city", "state", "country")):
+                    if not any(keyword in lowered_line for keyword in ("phone", "mobile", "tel", "telephone", "contact", "email")):
+                        address_candidates.append(line)
+                        continue
+
                 if any(keyword in lowered_line for keyword in ADDRESS_KEYWORDS) and re.search(r"\d", line):
                     if not any(keyword in lowered_line for keyword in ("phone", "mobile", "tel", "telephone", "contact", "email")):
                         address_candidates.append(line)
+                        continue
+
+                if re.search(r"\b(?:sector|street|road|avenue|lane|drive|way|boulevard|court|place|park|colony|area)\b", lowered_line) and re.search(r"\d", line):
+                    address_candidates.append(line)
 
             if address_candidates:
                 return self._clean_text(address_candidates[0])
@@ -259,7 +497,7 @@ class EmailExtractionEngine:
 
         try:
             lower_text = text.lower()
-            for keyword, designation in DESIGNATION_KEYWORDS.items():
+            for keyword, designation in sorted(DESIGNATION_KEYWORDS.items(), key=lambda item: len(item[0]), reverse=True):
                 if keyword in lower_text:
                     return designation
             return ""
@@ -277,14 +515,22 @@ class EmailExtractionEngine:
             organisation_name = self.extract_organisation_name(cleaned_text)
             address = self.extract_address(cleaned_text)
             designation = self.extract_designation(cleaned_text)
+            subject = self.extract_subject(cleaned_text)
 
             result: dict[str, str] = {
                 "contact_person_name": contact_name,
+                "customer_name": contact_name,
+                "name": contact_name,
                 "email_id": email_list[0] if email_list else "",
+                "email": email_list[0] if email_list else "",
                 "organisation_name": organisation_name,
+                "company": organisation_name,
                 "mobile_number": mobile_numbers[0] if mobile_numbers else "",
+                "phone": mobile_numbers[0] if mobile_numbers else "",
+                "normalized_phone": self._normalize_phone_for_duplicate_check(mobile_numbers[0]) if mobile_numbers else "",
                 "address": address,
                 "designation": designation,
+                "subject": subject,
             }
             LOGGER.info("Extraction complete for %d characters of email content.", len(cleaned_text))
             return result
@@ -292,11 +538,18 @@ class EmailExtractionEngine:
             LOGGER.exception("Unexpected extraction failure: %s", exc)
             return {
                 "contact_person_name": "",
+                "customer_name": "",
+                "name": "",
                 "email_id": "",
+                "email": "",
                 "organisation_name": "",
+                "company": "",
                 "mobile_number": "",
+                "phone": "",
+                "normalized_phone": "",
                 "address": "",
                 "designation": "",
+                "subject": "",
             }
 
 

@@ -1,53 +1,75 @@
 # Customer Email Extraction AI
 
-Customer Email Extraction AI is a Phase 1 reusable extraction engine that reads a business email and extracts contact details using spaCy, regular expressions, phonenumbers, and BeautifulSoup.
+Customer Email Extraction AI is a Streamlit app for extracting customer details from PDF uploads, TXT uploads, bulk email TXT files, pasted manual text, and Microsoft Outlook messages. The Outlook layer is prepared for Microsoft 365 delegated authentication, but the default mode is a safe local mock mode that does not require Azure credentials.
 
-## Installation
+## Local Setup
 
-1. Create and activate a Python 3.11+ virtual environment.
-2. Install the dependencies:
+Create and activate a virtual environment:
+
+```bash
+python -m venv .venv
+.venv\Scripts\activate
+```
+
+Install requirements:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-3. Download the spaCy English model if needed:
+Run the app:
 
 ```bash
-python -m spacy download en_core_web_sm
+streamlit run app.py
 ```
 
-## Running instructions
+## Mock Outlook Mode
 
-Run the extraction engine directly:
+The default `OUTLOOK_MODE` is `mock`. In this mode no Microsoft login, tenant ID, client ID, or client secret is required. Demo employees can be selected in the sidebar, and each employee sees only their own mock Outlook emails and imported customer records.
 
-```bash
-python extractor.py
-```
+## Switching To Live Outlook Later
 
-Run the test suite:
+Copy `.env.example` to `.env`, set `OUTLOOK_MODE=live`, and provide:
 
-```bash
-python test_extractor.py
-```
+- `AZURE_TENANT_ID`
+- `AZURE_CLIENT_ID`
+- `AZURE_CLIENT_SECRET`
+- `AZURE_REDIRECT_URI`
 
-## Project architecture
+The Graph placeholders use delegated `User.Read` and `Mail.Read` permissions. The app does not request `Mail.ReadWrite`, does not mark emails as read, and does not delete or modify mailbox messages.
 
-- `extractor.py`: reusable extraction engine with modular functions for HTML cleanup, email extraction, phone normalization, spaCy entity parsing, address detection, and designation detection.
-- `requirements.txt`: all Python dependencies required by the project.
-- `test_extractor.py`: sample business email scenarios that print the extracted JSON output for each scenario.
-- `README.md`: installation and usage guidance.
+## Security
 
-## Assumptions
+- Never commit `.env` or real Azure secrets.
+- Client secrets are read only from environment variables.
+- The Settings page shows whether credentials are configured, but never displays the client secret.
+- SQLite local data is stored in `customer_data.db`, which is ignored by git.
 
-- Input is a plain-text or HTML email body.
-- The engine is rule-based and deterministic for Phase 1.
-- If a field cannot be confidently inferred, the engine returns an empty string.
-- International phone numbers are normalized where possible using `phonenumbers`.
+## Multi-User Separation
 
-## Limitations
+All Outlook messages and customers include `user_id`. Mock users are isolated by demo employee email. Live mode should store the Microsoft user ID/email after login and use that as `user_id`, so one employee cannot see another employee's mailbox data or imported records.
 
-- This is a reusable extraction engine only; it does not include UI, API, database storage, Office 365 integration, Excel export, or duplicate detection.
-- spaCy entity extraction is language- and formatting-sensitive.
-- Designation detection uses keyword rules and may miss unusual titles.
-- Address extraction is conservative and may return only the most obvious location-like candidate.
+## Project Structure
+
+- `app.py`: Streamlit navigation entry point plus legacy upload helper functions.
+- `config.py`: environment configuration and mock/live mode selection.
+- `models.py`: Outlook and customer dataclasses.
+- `services/`: Graph auth/client placeholders, mock Outlook data, email processing, customer helpers.
+- `storage/database.py`: SQLite schema and parameterized queries.
+- `pages/`: Outlook Inbox, Manual Extraction, Customer Registry, and Settings page renderers.
+- Existing modules such as `extractor.py`, `duplicate_detector.py`, `bulk_email_processor.py`, and `excel_exporter.py` remain in use.
+
+## Current Limitations
+
+- Live Microsoft sign-in is scaffolded but not complete until Azure app registration and redirect URI configuration are supplied.
+- Attachments are listed by name only; attachment content extraction is not implemented.
+- The local SQLite database is intended for development and demo use, not production hosting.
+- The extraction engine is rule-based and may need tuning for unusual email formats.
+
+## Microsoft 365 Administrator Steps
+
+1. Register an Azure app.
+2. Configure the redirect URI used by Streamlit.
+3. Grant delegated `User.Read` and `Mail.Read` permissions.
+4. Provide tenant ID, client ID, and a secure client secret through environment variables.
+5. Confirm organizational consent and mailbox access policy.

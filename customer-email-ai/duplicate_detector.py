@@ -29,8 +29,8 @@ REQUIRED_KEYS = (
 
 
 def normalize_email(value: str) -> str:
-    """Normalize an email value by trimming spaces and lowercasing."""
-    return value.strip().lower() if isinstance(value, str) else ""
+    """Normalize an email value by removing spaces and lowercasing."""
+    return re.sub(r"\s+", "", value).lower() if isinstance(value, str) else ""
 
 
 def normalize_mobile(value: str) -> str:
@@ -66,7 +66,10 @@ def _prepare_record(record: dict[str, Any]) -> dict[str, Any]:
     normalized_record["contact_person_name"] = str(record.get("contact_person_name", "")).strip()
     normalized_record["email_id"] = normalize_email(record.get("email_id", ""))
     normalized_record["organisation_name"] = str(record.get("organisation_name", "")).strip()
-    normalized_record["mobile_number"] = normalize_mobile(record.get("mobile_number", ""))
+    normalized_record["mobile_number"] = str(record.get("mobile_number", "")).strip()
+    normalized_record["normalized_phone"] = normalize_mobile(
+        record.get("normalized_phone") or record.get("mobile_number", "")
+    )
     normalized_record["address"] = str(record.get("address", "")).strip()
     normalized_record["designation"] = str(record.get("designation", "")).strip()
     return normalized_record
@@ -96,7 +99,7 @@ def detect_duplicates(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 continue
 
             same_email = record.get("email_id") and record.get("email_id") == other_record.get("email_id")
-            same_mobile = record.get("mobile_number") and record.get("mobile_number") == other_record.get("mobile_number")
+            same_mobile = record.get("normalized_phone") and record.get("normalized_phone") == other_record.get("normalized_phone")
 
             if same_email or same_mobile:
                 status = "Duplicate"
@@ -122,7 +125,7 @@ def detect_duplicates(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
             {
                 **record,
                 "duplicate_status": status,
-                "confidence": confidence,
+                "confidence_score": confidence,
             }
         )
 
