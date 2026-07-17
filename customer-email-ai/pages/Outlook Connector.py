@@ -43,7 +43,7 @@ def _format_received(value: str) -> str:
 def render(user_id: str) -> None:
     """Render the Outlook Inbox page."""
     st.title("Customer Email Extraction")
-    st.caption("Connect Outlook, select customer emails and export extracted details to Excel.")
+    st.caption("Outlook Connection -> Inbox Emails -> Select Emails -> Extract Customer Information -> Review Extracted Records -> Save to Customer Registry -> Download Excel")
     if IMPORT_ERROR is not None:
         LOGGER.exception("Outlook connector import failed.")
         st.error("Outlook Connector could not load. Please check the application setup.")
@@ -98,13 +98,17 @@ def render(user_id: str) -> None:
 def _render_connection_panel() -> bool:
     """Render Outlook connection state and return whether inbox loading can continue."""
     st.subheader("Outlook Connection")
-    status_label = "Demo emails" if config.is_mock_mode() else ("Connected" if graph_auth.is_connected() else "Not connected")
-    mode_label = "Demo" if config.is_mock_mode() else "Live"
-    account = config.APP_USER_EMAIL
+    status_label = "Demo Mode" if config.is_mock_mode() else ("Connected" if graph_auth.is_connected() else "Outlook not connected")
+    mode_label = "Demo Mode" if config.is_mock_mode() else "Real Mode"
+    account = "Demo account" if config.is_mock_mode() else "Not connected"
 
     if config.is_mock_mode():
         st.markdown("`Demo Mode`")
-        st.write("Demo emails are being used. Connect Microsoft Outlook when credentials are configured.")
+        missing = ", ".join(config.missing_live_settings())
+        st.info(
+            "Demo email data is shown because Microsoft Outlook is not fully configured. "
+            f"Missing configuration: {missing or 'Microsoft credentials'}."
+        )
     else:
         graph_auth.handle_auth_callback()
         if graph_auth.auth_error():
@@ -132,19 +136,20 @@ def _render_connection_panel() -> bool:
         else:
             st.button("Sign in with Microsoft", disabled=True, use_container_width=True)
     with status_cols[4]:
-        if st.button("Disconnect", use_container_width=True):
+        if st.button("Disconnect", disabled=not graph_auth.is_connected(), use_container_width=True):
             graph_auth.logout_user()
             st.session_state.outlook_messages_cache = []
             st.session_state.selected_outlook_messages = []
             st.rerun()
 
     if login_disabled:
-        st.caption("Microsoft login will be available after Client ID and redirect URL are configured.")
+        st.caption("Microsoft login will be available after Client ID, Client Secret, Tenant ID and Redirect URI are configured.")
 
     if config.is_mock_mode():
         return True
 
-    if not config.AZURE_REDIRECT_URI.startswith(("http://localhost", "https://")):
+    redirect_uri = config.get_microsoft_redirect_uri()
+    if not redirect_uri.startswith(("http://localhost", "https://")):
         st.error("The redirect URL needs to be corrected before Outlook can connect.")
         return False
 
@@ -170,19 +175,19 @@ def _login_is_disabled() -> bool:
     """Return whether the Microsoft login button should be disabled."""
     if config.is_mock_mode():
         return True
-    return not config.AZURE_CLIENT_ID or not config.AZURE_REDIRECT_URI
+    return not config.is_microsoft_configured()
 
 
 def _render_quick_actions(user_id: str) -> tuple[bool, bool, bool]:
     """Render the business workflow action row."""
-    st.subheader("Quick Actions")
+    st.subheader("Inbox Emails")
     action_cols = st.columns([0.25, 0.25, 0.25, 0.25])
     with action_cols[0]:
         refresh_clicked = st.button("Refresh Inbox", type="primary", use_container_width=True)
     with action_cols[1]:
-        import_selected_clicked = st.button("Import Selected", use_container_width=True)
+        import_selected_clicked = st.button("Extract Selected Emails", use_container_width=True)
     with action_cols[2]:
-        import_unread_clicked = st.button("Import All Unread", use_container_width=True)
+        import_unread_clicked = st.button("Extract All Unread", use_container_width=True)
     with action_cols[3]:
         _render_excel_export(user_id, label="Export Excel")
     return refresh_clicked, import_selected_clicked, import_unread_clicked
@@ -230,7 +235,7 @@ def _filter_messages(messages: list, search_text: str, read_filter: str, date_ra
 
 def _render_inbox_list(messages: list, status_rows: dict[str, str]) -> list[str]:
     """Render selectable inbox rows and return selected message ids."""
-    st.subheader("Inbox List")
+    st.subheader("Select Emails")
     if not messages:
         st.info("No emails found for the selected filters.")
         st.session_state.selected_outlook_messages = []
@@ -244,6 +249,7 @@ def _render_inbox_list(messages: list, status_rows: dict[str, str]) -> list[str]
             "Subject": message.subject,
             "Received": _format_received(message.received_datetime),
             "Status": "Read" if message.is_read else "Unread",
+            "Processing": status_rows.get(message.message_id, "Pending"),
             "Attachment": "Yes" if message.has_attachments else "No",
             "Message ID": message.message_id,
         }
@@ -262,7 +268,7 @@ def _render_inbox_list(messages: list, status_rows: dict[str, str]) -> list[str]
     )
     selected_ids = edited.loc[edited["Select"], "Message ID"].tolist() if not edited.empty else []
     st.session_state.selected_outlook_messages = selected_ids
-    st.caption(f"{len(selected_ids)} selected. Status is refreshed after import.")
+    st.caption(f"{len(messages)} fetched. {len(selected_ids)} selected. Status is refreshed after extraction.")
     return selected_ids
 
 
@@ -283,6 +289,7 @@ def _render_excel_export(user_id: str, label: str = "Export to Excel") -> None:
 
 def _import_messages(user_id: str, messages: list, message_ids: list[str]) -> None:
     """Import selected mock/live Outlook messages."""
+    st.subheader("Extract Customer Information")
     by_id = {message.message_id: message for message in messages}
     summary = {
         "emails_processed": 0,
@@ -296,7 +303,8 @@ def _import_messages(user_id: str, messages: list, message_ids: list[str]) -> No
         st.session_state.outlook_import_summary = summary
         st.warning("Select at least one email to import.")
         return
-    for message_id in message_ids:
+    progress = st.progress(0)
+    for index, message_id in enumerate(message_ids, start=1):
         summary["emails_processed"] += 1
         if message_id in imported_ids:
             summary["duplicates_skipped"] += 1
@@ -324,6 +332,7 @@ def _import_messages(user_id: str, messages: list, message_ids: list[str]) -> No
         except Exception:
             LOGGER.exception("Outlook message import failed.")
             summary["failed_records"] += 1
+        progress.progress(index / len(message_ids))
     st.session_state.imported_outlook_message_ids = sorted(imported_ids)
     st.session_state.outlook_import_summary = summary
 
@@ -333,7 +342,7 @@ def _render_import_result() -> None:
     summary = st.session_state.get("outlook_import_summary")
     if not summary:
         return
-    st.subheader("Import Result")
+    st.subheader("Extraction Summary")
     result_cols = st.columns(5)
     labels = [
         ("Emails processed", "emails_processed"),
@@ -348,12 +357,12 @@ def _render_import_result() -> None:
     if summary.get("failed_records"):
         st.warning("Some emails could not be imported. The technical details were written to the logs.")
     elif summary.get("emails_processed"):
-        st.success("Import completed.")
+        st.success("Customer information was saved to the Customer Registry.")
 
 
 def _render_customer_preview(user_id: str) -> None:
     """Render extracted Outlook customers below the inbox."""
-    st.subheader("Extracted Customer Preview")
+    st.subheader("Review Extracted Records")
     rows = [row for row in get_customers(user_id) if row.get("source") == "Outlook"]
     if not rows:
         st.info("Extracted Outlook customer records will appear here after import.")
@@ -386,8 +395,22 @@ def _friendly_exception_message(exc: Exception) -> str:
     lower = message.lower()
     if "expired" in lower:
         return "Your Outlook session expired. Please sign in again."
+    if "secret" in lower or "invalid_client" in lower:
+        return "The Microsoft client secret is invalid or expired. Ask the administrator to update Streamlit Secrets with a new Secret Value."
+    if "redirect" in lower or "aadsts50011" in lower:
+        return "The Microsoft redirect URI does not match the Entra app registration."
+    if "tenant" in lower:
+        return "The Microsoft tenant ID is invalid or does not match this app registration."
     if "permission" in lower or "consent" in lower:
         return "Outlook permissions are not approved yet. Your Microsoft administrator may need to grant access."
+    if "mail.read" in lower:
+        return "The Mail.Read permission is missing or has not been approved."
+    if "network" in lower:
+        return "Network failure while contacting Microsoft. Please try again."
+    if "graph" in lower:
+        return "Microsoft Graph could not complete the request. Please try again."
+    if "database" in lower:
+        return "The database could not save Outlook data. Please try again."
     if "mailbox" in lower:
         return "This Microsoft account does not have an available mailbox."
     if "configuration" in lower or "missing" in lower:

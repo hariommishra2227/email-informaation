@@ -30,9 +30,9 @@ def _build_msal_app():
     if msal is None:
         raise RuntimeError("msal is required for live Outlook mode. Install requirements.txt first.")
     return msal.ConfidentialClientApplication(
-        client_id=config.AZURE_CLIENT_ID,
-        client_credential=config.AZURE_CLIENT_SECRET,
-        authority=config.AZURE_AUTHORITY,
+        client_id=config.get_microsoft_client_id(),
+        client_credential=config.get_microsoft_client_secret(),
+        authority=f"https://login.microsoftonline.com/{config.get_microsoft_tenant_id()}",
     )
 
 
@@ -48,7 +48,7 @@ def create_login_url() -> str:
     app = _build_msal_app()
     return app.get_authorization_request_url(
         scopes=config.GRAPH_SCOPES,
-        redirect_uri=config.AZURE_REDIRECT_URI,
+        redirect_uri=config.get_microsoft_redirect_uri(),
         state=state,
         prompt="select_account",
     )
@@ -62,7 +62,7 @@ def acquire_token_by_authorization_code(code: str) -> dict[str, Any]:
     result = app.acquire_token_by_authorization_code(
         code=code,
         scopes=config.GRAPH_SCOPES,
-        redirect_uri=config.AZURE_REDIRECT_URI,
+        redirect_uri=config.get_microsoft_redirect_uri(),
     )
     if "access_token" not in result:
         raise RuntimeError(_friendly_auth_error(result))
@@ -86,12 +86,14 @@ def handle_auth_callback() -> bool:
 
     expected_state = st.session_state.get(AUTH_STATE_KEY)
     received_state = params.get("state")
-    if expected_state and received_state and expected_state != received_state:
+    if not expected_state or not received_state or expected_state != received_state:
         st.session_state[AUTH_ERROR_STATE_KEY] = "Microsoft sign-in state did not match. Please try again."
+        st.query_params.clear()
         return False
 
     try:
         acquire_token_by_authorization_code(str(code))
+        st.session_state.pop(AUTH_STATE_KEY, None)
         st.query_params.clear()
         st.session_state.pop(AUTH_ERROR_STATE_KEY, None)
         return True
@@ -127,6 +129,8 @@ def get_valid_access_token() -> str:
 def logout_user() -> None:
     """Disconnect Outlook by removing account and token data from session state."""
     for key in (TOKEN_STATE_KEY, ACCOUNT_STATE_KEY, USER_STATE_KEY, AUTH_STATE_KEY, AUTH_ERROR_STATE_KEY):
+        st.session_state.pop(key, None)
+    for key in ("outlook_messages_cache", "selected_outlook_messages", "outlook_import_summary"):
         st.session_state.pop(key, None)
 
 
@@ -176,9 +180,15 @@ def _friendly_error_text(message: str) -> str:
     lower = message.lower()
     if "aadsts65001" in lower or "consent" in lower:
         return "Admin consent or user consent is required for Microsoft Graph permissions."
+    if "aadsts7000222" in lower or "expired" in lower:
+        return "The Microsoft client secret has expired. Create a new Secret Value and update Streamlit Secrets."
+    if "aadsts7000215" in lower or "invalid_client" in lower:
+        return "The Microsoft client secret is invalid. Use the client secret Value, not the Secret ID."
+    if "aadsts700016" in lower or "tenant" in lower:
+        return "The Microsoft tenant or application id is invalid for this app registration."
     if "aadsts50020" in lower:
         return "This Microsoft account is not allowed by the app registration. Enable personal accounts and organizational accounts."
-    if "redirect_uri" in lower or "reply address" in lower:
+    if "aadsts50011" in lower or "redirect_uri" in lower or "reply address" in lower:
         return "The redirect URI is invalid or missing in Microsoft Entra app registration."
     if "access_denied" in lower or "permission" in lower:
         return "Permission was denied during Microsoft sign-in."

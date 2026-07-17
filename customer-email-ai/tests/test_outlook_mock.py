@@ -27,7 +27,7 @@ def test_single_default_user_loads_correctly() -> None:
     """The configured app user email is separate from the fixed internal user id."""
     current_user = graph_client.get_current_user(config.DEFAULT_USER_ID)
 
-    assert config.APP_USER_EMAIL == "boss@company.com"
+    assert config.APP_USER_EMAIL == "Demo account"
     assert config.DEFAULT_USER_ID == "default_user"
     assert current_user["id"] == config.DEFAULT_USER_ID
     assert current_user["mail"] == config.APP_USER_EMAIL

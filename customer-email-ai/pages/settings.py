@@ -19,25 +19,24 @@ def render() -> None:
         st.error("Settings could not load. Please check the application setup.")
         return
     rows = {
-        "Application Mode": "Demo" if config.is_mock_mode() else "Live",
+        "Application Mode": "Demo Mode" if config.is_mock_mode() else "Real Mode",
         "Outlook Account Support": "Work/School and Personal Microsoft accounts",
         "Connection Status": _connection_status(),
-        "Client ID Configured": "Yes" if config.AZURE_CLIENT_ID else "No",
-        "Redirect URI Configured": "Yes" if config.AZURE_REDIRECT_URI else "No",
         "Application Version": "1.0",
     }
     for label, value in rows.items():
         st.write(f"**{label}:** {value}")
 
-    with st.expander("Technical Configuration"):
-        technical_rows = {
-            "Outlook mode value": config.OUTLOOK_MODE,
-            "Authority": config.AZURE_AUTHORITY,
-            "Redirect URI": config.AZURE_REDIRECT_URI or "Not configured",
-            "Client Secret Configured": "Yes" if config.AZURE_CLIENT_SECRET else "No",
-        }
-        for label, value in technical_rows.items():
-            st.write(f"**{label}:** {value}")
+    st.subheader("Microsoft Outlook Configuration")
+    status_rows = {
+        "Client ID configured": "Yes" if config.get_microsoft_client_id() else "No",
+        "Client Secret configured": "Yes" if config.get_microsoft_client_secret() else "No",
+        "Tenant ID configured": "Yes" if config.get_microsoft_tenant_id() else "No",
+        "Redirect URI configured": "Yes" if config.get_microsoft_redirect_uri() else "No",
+        "Microsoft Outlook ready": "Yes" if config.is_microsoft_configured() else "No",
+    }
+    for label, value in status_rows.items():
+        st.write(f"**{label}:** {value}")
 
     if st.button("Test Configuration", type="primary"):
         if config.is_mock_mode():
@@ -46,9 +45,7 @@ def render() -> None:
             missing = config.missing_live_settings()
             if missing:
                 st.error("Live Outlook configuration is incomplete.")
-            elif config.AZURE_AUTHORITY != "https://login.microsoftonline.com/common":
-                st.warning("Use https://login.microsoftonline.com/common to support work/school and personal accounts.")
-            elif not config.AZURE_REDIRECT_URI.startswith(("http://localhost", "https://")):
+            elif not config.get_microsoft_redirect_uri().startswith(("http://localhost", "https://")):
                 st.error("Redirect URI must be http://localhost:8501 locally or an HTTPS Streamlit Cloud URL.")
             else:
                 st.success("Live Outlook configuration is present. Complete Microsoft sign-in to test mailbox access.")
@@ -57,7 +54,7 @@ def render() -> None:
 def _connection_status() -> str:
     """Return a safe settings-page connection status."""
     if config.is_mock_mode():
-        return "Mock mode"
+        return "Demo Mode"
     return "Connected" if graph_auth.is_connected() else "Not connected"
 
 
