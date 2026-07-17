@@ -32,7 +32,7 @@ def _build_msal_app():
     return msal.ConfidentialClientApplication(
         client_id=config.get_microsoft_client_id(),
         client_credential=config.get_microsoft_client_secret(),
-        authority=f"https://login.microsoftonline.com/{config.get_microsoft_tenant_id()}",
+        authority=config.get_microsoft_authority(),
     )
 
 
