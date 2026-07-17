@@ -1,8 +1,12 @@
 .env
+*.env
 .streamlit/secrets.toml
 *.db
+*.sqlite
 customer_data.db
 customer_data.db-journal
+token_cache*
+msal_cache*
 test_customer_data_*.db
 test_customer_data_*.db-journal
 __pycache__/
