@@ -16,21 +16,32 @@ streamlit run app.py
 Use Streamlit Cloud Secrets or local `.streamlit/secrets.toml`. Do not commit real secrets.
 
 ```toml
-[microsoft]
-client_id = "YOUR_APPLICATION_CLIENT_ID"
-client_secret = "YOUR_NEW_CLIENT_SECRET_VALUE"
-tenant_id = "YOUR_DIRECTORY_TENANT_ID"
-redirect_uri = "YOUR_REGISTERED_REDIRECT_URI"
+OUTLOOK_MODE = "live"
+MICROSOFT_CLIENT_ID = "4335e7ae-5e59-4e85-8f6a-ed65faa25a75"
+MICROSOFT_CLIENT_SECRET = "PASTE_NEW_CLIENT_SECRET_VALUE_IN_STREAMLIT_CLOUD"
+MICROSOFT_TENANT_ID = "daf0c175-51bd-4552-a1e0-9a4d96c2d001"
+MICROSOFT_REDIRECT_URI = "https://email-informaation-frmrxrcergpwxbvh5lcqux.streamlit.app"
 ```
 
 Environment-variable fallback is also supported:
 
+- `OUTLOOK_MODE`
 - `MICROSOFT_CLIENT_ID`
 - `MICROSOFT_CLIENT_SECRET`
 - `MICROSOFT_TENANT_ID`
 - `MICROSOFT_REDIRECT_URI`
+- `AZURE_CLIENT_ID`
+- `AZURE_CLIENT_SECRET`
+- `AZURE_REDIRECT_URI`
+- `AZURE_AUTHORITY`
 
-The redirect URI must exactly match the URL that opens the Streamlit app and returns to `pages/Outlook Connector.py`. For local testing, use the full local page URL shown by Streamlit for that page. For Streamlit Cloud, use the deployed HTTPS page URL for the Outlook Connector page.
+The production redirect URI must exactly match:
+
+```text
+https://email-informaation-frmrxrcergpwxbvh5lcqux.streamlit.app
+```
+
+Do not append `/Outlook_Connector` or `/callback` for the current implementation.
 
 ## Microsoft Entra Configuration
 
@@ -76,7 +87,7 @@ The redirect URI must exactly match the URL that opens the Streamlit app and ret
 - Admin consent required: grant tenant admin consent for the delegated Graph permissions.
 - Tenant mismatch: verify the Directory Tenant ID belongs to the app registration.
 - `Mail.Read` missing: add delegated `Mail.Read` and grant consent if required.
-- App remains in Demo Mode: one or more `[microsoft]` values is missing or empty.
+- App remains in Demo Mode: `OUTLOOK_MODE` is not `live`, or one of the resolved Microsoft/Azure configuration values is missing.
 
 ## Project Structure
 

@@ -33,7 +33,7 @@ def render() -> None:
         "Client Secret configured": "Yes" if config.get_microsoft_client_secret() else "No",
         "Tenant ID configured": "Yes" if config.get_microsoft_tenant_id() else "No",
         "Redirect URI configured": "Yes" if config.get_microsoft_redirect_uri() else "No",
-        "Microsoft Outlook ready": "Yes" if config.is_microsoft_configured() else "No",
+        "Outlook live mode ready": "Yes" if config.is_microsoft_configured() else "No",
     }
     for label, value in status_rows.items():
         st.write(f"**{label}:** {value}")
