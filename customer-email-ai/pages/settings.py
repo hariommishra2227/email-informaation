@@ -29,10 +29,10 @@ def render() -> None:
 
     st.subheader("Microsoft Outlook Configuration")
     status_rows = {
-        "Client ID configured": "Yes" if config.get_microsoft_client_id() else "No",
-        "Client Secret configured": "Yes" if config.get_microsoft_client_secret() else "No",
-        "Tenant ID configured": "Yes" if config.get_microsoft_tenant_id() else "No",
-        "Redirect URI configured": "Yes" if config.get_microsoft_redirect_uri() else "No",
+        "Client ID configured": "Yes" if config.CLIENT_ID else "No",
+        "Client Secret configured": "Yes" if config.CLIENT_SECRET else "No",
+        "Tenant ID configured": "Yes" if config.TENANT_ID else "No",
+        "Redirect URI configured": "Yes" if config.REDIRECT_URI else "No",
         "Outlook live mode ready": "Yes" if config.is_microsoft_configured() else "No",
     }
     for label, value in status_rows.items():
@@ -45,7 +45,7 @@ def render() -> None:
             missing = config.missing_live_settings()
             if missing:
                 st.error("Live Outlook configuration is incomplete.")
-            elif not config.get_microsoft_redirect_uri().startswith(("http://localhost", "https://")):
+            elif not config.REDIRECT_URI.startswith(("http://localhost", "https://")):
                 st.error("Redirect URI must be http://localhost:8501 locally or an HTTPS Streamlit Cloud URL.")
             else:
                 st.success("Live Outlook configuration is present. Complete Microsoft sign-in to test mailbox access.")

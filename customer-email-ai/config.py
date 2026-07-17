@@ -94,12 +94,19 @@ RESOLVED_AUTHORITY = (
     else LEGACY_AZURE_AUTHORITY
 )
 
+# Canonical resolved Microsoft Outlook configuration used by the app.
+CLIENT_ID = RESOLVED_CLIENT_ID
+CLIENT_SECRET = RESOLVED_CLIENT_SECRET
+TENANT_ID = RESOLVED_TENANT_ID
+REDIRECT_URI = RESOLVED_REDIRECT_URI
+AUTHORITY = RESOLVED_AUTHORITY
+
 # Backward-compatible aliases for older code paths and tests.
-AZURE_CLIENT_ID = RESOLVED_CLIENT_ID
-AZURE_CLIENT_SECRET = RESOLVED_CLIENT_SECRET
-AZURE_TENANT_ID = RESOLVED_TENANT_ID
-AZURE_REDIRECT_URI = RESOLVED_REDIRECT_URI
-AZURE_AUTHORITY = RESOLVED_AUTHORITY
+AZURE_CLIENT_ID = CLIENT_ID
+AZURE_CLIENT_SECRET = CLIENT_SECRET
+AZURE_TENANT_ID = TENANT_ID
+AZURE_REDIRECT_URI = REDIRECT_URI
+AZURE_AUTHORITY = AUTHORITY
 
 GRAPH_SCOPES = ["User.Read", "Mail.Read", "offline_access", "openid", "profile", "email"]
 OUTLOOK_MODE = OUTLOOK_MODE_LIVE if CONFIGURED_OUTLOOK_MODE == OUTLOOK_MODE_LIVE else OUTLOOK_MODE_MOCK
@@ -107,27 +114,27 @@ OUTLOOK_MODE = OUTLOOK_MODE_LIVE if CONFIGURED_OUTLOOK_MODE == OUTLOOK_MODE_LIVE
 
 def get_microsoft_client_id() -> str:
     """Return the resolved Microsoft application client id."""
-    return RESOLVED_CLIENT_ID
+    return CLIENT_ID
 
 
 def get_microsoft_client_secret() -> str:
     """Return the resolved Microsoft application client secret."""
-    return RESOLVED_CLIENT_SECRET
+    return CLIENT_SECRET
 
 
 def get_microsoft_tenant_id() -> str:
     """Return the configured Microsoft tenant id."""
-    return RESOLVED_TENANT_ID
+    return TENANT_ID
 
 
 def get_microsoft_redirect_uri() -> str:
     """Return the resolved Microsoft OAuth redirect URI."""
-    return RESOLVED_REDIRECT_URI
+    return REDIRECT_URI
 
 
 def get_microsoft_authority() -> str:
     """Return the resolved Microsoft OAuth authority."""
-    return RESOLVED_AUTHORITY
+    return AUTHORITY
 
 
 def has_authority_configuration() -> bool:
@@ -161,9 +168,9 @@ def missing_live_settings() -> list[str]:
     """Return required live-mode setting names that are not configured."""
     required = {
         "OUTLOOK_MODE=live": OUTLOOK_MODE == OUTLOOK_MODE_LIVE,
-        "MICROSOFT_CLIENT_ID or AZURE_CLIENT_ID": get_microsoft_client_id(),
-        "MICROSOFT_CLIENT_SECRET or AZURE_CLIENT_SECRET": get_microsoft_client_secret(),
-        "MICROSOFT_TENANT_ID or AZURE_AUTHORITY": has_authority_configuration(),
-        "MICROSOFT_REDIRECT_URI or AZURE_REDIRECT_URI": get_microsoft_redirect_uri(),
+        "MICROSOFT_CLIENT_ID": CLIENT_ID,
+        "MICROSOFT_CLIENT_SECRET": CLIENT_SECRET,
+        "MICROSOFT_TENANT_ID": has_authority_configuration(),
+        "MICROSOFT_REDIRECT_URI": REDIRECT_URI,
     }
     return [name for name, value in required.items() if not value]

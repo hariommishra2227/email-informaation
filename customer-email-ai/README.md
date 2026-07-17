@@ -17,10 +17,10 @@ Use Streamlit Cloud Secrets or local `.streamlit/secrets.toml`. Do not commit re
 
 ```toml
 OUTLOOK_MODE = "live"
-MICROSOFT_CLIENT_ID = "4335e7ae-5e59-4e85-8f6a-ed65faa25a75"
-MICROSOFT_CLIENT_SECRET = "PASTE_NEW_CLIENT_SECRET_VALUE_IN_STREAMLIT_CLOUD"
-MICROSOFT_TENANT_ID = "daf0c175-51bd-4552-a1e0-9a4d96c2d001"
-MICROSOFT_REDIRECT_URI = "https://email-informaation-frmrxrcergpwxbvh5lcqux.streamlit.app"
+MICROSOFT_CLIENT_ID = "value"
+MICROSOFT_CLIENT_SECRET = "value"
+MICROSOFT_TENANT_ID = "value"
+MICROSOFT_REDIRECT_URI = "value"
 ```
 
 Environment-variable fallback is also supported:

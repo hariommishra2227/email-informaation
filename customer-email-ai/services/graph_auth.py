@@ -30,9 +30,9 @@ def _build_msal_app():
     if msal is None:
         raise RuntimeError("msal is required for live Outlook mode. Install requirements.txt first.")
     return msal.ConfidentialClientApplication(
-        client_id=config.get_microsoft_client_id(),
-        client_credential=config.get_microsoft_client_secret(),
-        authority=config.get_microsoft_authority(),
+        client_id=config.CLIENT_ID,
+        client_credential=config.CLIENT_SECRET,
+        authority=config.AUTHORITY,
     )
 
 
@@ -48,7 +48,7 @@ def create_login_url() -> str:
     app = _build_msal_app()
     return app.get_authorization_request_url(
         scopes=config.GRAPH_SCOPES,
-        redirect_uri=config.get_microsoft_redirect_uri(),
+        redirect_uri=config.REDIRECT_URI,
         state=state,
         prompt="select_account",
     )
@@ -62,7 +62,7 @@ def acquire_token_by_authorization_code(code: str) -> dict[str, Any]:
     result = app.acquire_token_by_authorization_code(
         code=code,
         scopes=config.GRAPH_SCOPES,
-        redirect_uri=config.get_microsoft_redirect_uri(),
+        redirect_uri=config.REDIRECT_URI,
     )
     if "access_token" not in result:
         raise RuntimeError(_friendly_auth_error(result))

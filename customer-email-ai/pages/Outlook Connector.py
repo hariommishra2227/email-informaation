@@ -148,8 +148,7 @@ def _render_connection_panel() -> bool:
     if config.is_mock_mode():
         return True
 
-    redirect_uri = config.get_microsoft_redirect_uri()
-    if not redirect_uri.startswith(("http://localhost", "https://")):
+    if not config.REDIRECT_URI.startswith(("http://localhost", "https://")):
         st.error("The redirect URL needs to be corrected before Outlook can connect.")
         return False
 
