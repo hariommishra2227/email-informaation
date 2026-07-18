@@ -771,9 +771,6 @@ def upgraded_main() -> None:
         initialize_outlook_session_state()
         render_styles()
 
-        if not app_config.is_mock_mode():
-            graph_auth.handle_auth_callback()
-
         st.title("Dashboard")
         st.caption("Track Outlook emails, extracted customers and duplicate records.")
         if not app_config.is_mock_mode() and graph_auth.auth_error():
