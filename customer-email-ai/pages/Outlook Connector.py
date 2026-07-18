@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 import logging
+from urllib.parse import urlparse
 
 import pandas as pd
 import streamlit as st
@@ -98,6 +99,9 @@ def render(user_id: str) -> None:
 def _render_connection_panel() -> bool:
     """Render Outlook connection state and return whether inbox loading can continue."""
     st.subheader("Outlook Connection")
+    if not config.is_mock_mode():
+        graph_auth.handle_auth_callback()
+
     status_label = "Demo Mode" if config.is_mock_mode() else ("Connected" if graph_auth.is_connected() else "Outlook not connected")
     mode_label = "Demo Mode" if config.is_mock_mode() else "Real Mode"
     account = "Demo account" if config.is_mock_mode() else "Not connected"
@@ -110,7 +114,6 @@ def _render_connection_panel() -> bool:
             f"Missing configuration: {missing or 'Microsoft credentials'}."
         )
     else:
-        graph_auth.handle_auth_callback()
         if graph_auth.auth_error():
             st.error(graph_auth.auth_error())
         account_data = graph_auth.connected_user()
@@ -126,21 +129,24 @@ def _render_connection_panel() -> bool:
     login_disabled = _login_is_disabled()
     with status_cols[3]:
         if config.is_mock_mode() or login_disabled:
-            st.button("Sign in with Microsoft", disabled=True, use_container_width=True)
+            st.button("Connect Outlook", disabled=True, use_container_width=True)
         elif not graph_auth.is_connected():
             try:
-                st.link_button("Sign in with Microsoft", graph_auth.create_login_url(), type="primary", use_container_width=True)
+                st.link_button("Connect Outlook", graph_auth.create_login_url(), type="primary", use_container_width=True)
             except Exception as exc:
                 LOGGER.exception("Could not create Microsoft login URL.")
                 st.error(_friendly_exception_message(exc))
         else:
-            st.button("Sign in with Microsoft", disabled=True, use_container_width=True)
+            st.button("Connect Outlook", disabled=True, use_container_width=True)
     with status_cols[4]:
-        if st.button("Disconnect", disabled=not graph_auth.is_connected(), use_container_width=True):
+        disconnect_disabled = not (graph_auth.token_exists() or graph_auth.connected_user() or graph_auth.auth_error())
+        if st.button("Disconnect", disabled=disconnect_disabled, use_container_width=True):
             graph_auth.logout_user()
             st.session_state.outlook_messages_cache = []
             st.session_state.selected_outlook_messages = []
             st.rerun()
+
+    _render_safe_diagnostics()
 
     if login_disabled:
         st.caption("Microsoft login will be available after Client ID, Client Secret, Tenant ID and Redirect URI are configured.")
@@ -175,6 +181,32 @@ def _login_is_disabled() -> bool:
     if config.is_mock_mode():
         return True
     return not config.is_microsoft_configured()
+
+
+def _render_safe_diagnostics() -> None:
+    """Show temporary Outlook diagnostics without exposing secrets or tokens."""
+    authority = urlparse(config.AUTHORITY or "")
+    authority_host = authority.netloc or "Not configured"
+    tenant_id = config.TENANT_ID or _tenant_from_authority_path(authority.path) or "Not configured"
+    rows = {
+        "Current mode": "Mock" if config.is_mock_mode() else "Live",
+        "Client ID loaded": "Yes" if config.CLIENT_ID else "No",
+        "Client secret loaded": "Yes" if config.CLIENT_SECRET else "No",
+        "Redirect URI": config.REDIRECT_URI or "Not configured",
+        "Authority host": authority_host,
+        "Tenant ID": tenant_id,
+        "Token exists": "Yes" if graph_auth.token_exists() else "No",
+        "Granted scopes": ", ".join(graph_auth.granted_scopes()) or "None",
+    }
+    with st.expander("Outlook diagnostics", expanded=False):
+        for label, value in rows.items():
+            st.write(f"**{label}:** {value}")
+
+
+def _tenant_from_authority_path(path: str) -> str:
+    """Extract the tenant path segment from a Microsoft authority URL."""
+    parts = [part for part in path.split("/") if part]
+    return parts[0] if parts else ""
 
 
 def _render_quick_actions(user_id: str) -> tuple[bool, bool, bool]:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import json
 import logging
 import time
 import uuid
@@ -23,6 +25,7 @@ ACCOUNT_STATE_KEY = "outlook_account"
 USER_STATE_KEY = "outlook_connected_user"
 AUTH_STATE_KEY = "outlook_auth_state"
 AUTH_ERROR_STATE_KEY = "outlook_auth_error"
+REQUIRED_MAIL_SCOPE = "Mail.Read"
 
 
 def _build_msal_app():
@@ -65,8 +68,11 @@ def acquire_token_by_authorization_code(code: str) -> dict[str, Any]:
         redirect_uri=config.REDIRECT_URI,
     )
     if "access_token" not in result:
-        raise RuntimeError(_friendly_auth_error(result))
+        raise RuntimeError(_format_token_error(result))
     _store_token_result(result)
+    if not has_granted_scope(REQUIRED_MAIL_SCOPE, result):
+        granted = ", ".join(granted_scopes(result)) or "none"
+        raise RuntimeError(f"Microsoft token did not include {REQUIRED_MAIL_SCOPE}. Granted scopes: {granted}.")
     return result
 
 
@@ -77,12 +83,11 @@ def handle_auth_callback() -> bool:
 
     params = st.query_params
     if "error" in params:
-        details = params.get("error_description") or params.get("error") or "Microsoft sign-in failed."
-        st.session_state[AUTH_ERROR_STATE_KEY] = _friendly_error_text(str(details))
+        st.session_state[AUTH_ERROR_STATE_KEY] = _format_query_error(params)
         return False
     code = params.get("code")
     if not code:
-        return bool(st.session_state.get(TOKEN_STATE_KEY))
+        return has_valid_access_token()
 
     expected_state = st.session_state.get(AUTH_STATE_KEY)
     received_state = params.get("state")
@@ -113,6 +118,7 @@ def get_valid_access_token() -> str:
         return str(access_token)
 
     refresh_token = token_result.get("refresh_token")
+    refresh_error = ""
     if refresh_token:
         result = _build_msal_app().acquire_token_by_refresh_token(
             refresh_token=refresh_token,
@@ -120,9 +126,15 @@ def get_valid_access_token() -> str:
         )
         if "access_token" in result:
             _store_token_result(result)
+            if not has_granted_scope(REQUIRED_MAIL_SCOPE, result):
+                granted = ", ".join(granted_scopes(result)) or "none"
+                raise RuntimeError(f"Microsoft token did not include {REQUIRED_MAIL_SCOPE}. Granted scopes: {granted}.")
             return str(result["access_token"])
+        refresh_error = _format_token_error(result)
 
     logout_user()
+    if refresh_error:
+        st.session_state[AUTH_ERROR_STATE_KEY] = refresh_error
     raise RuntimeError("Your Microsoft session expired. Sign in again.")
 
 
@@ -135,8 +147,43 @@ def logout_user() -> None:
 
 
 def is_connected() -> bool:
-    """Return whether the current Streamlit session has an Outlook token."""
+    """Return whether the current Streamlit session has a usable Outlook token."""
+    return has_valid_access_token() and has_granted_scope(REQUIRED_MAIL_SCOPE)
+
+
+def token_exists() -> bool:
+    """Return whether any Outlook token result is present in session state."""
     return bool(st.session_state.get(TOKEN_STATE_KEY, {}).get("access_token"))
+
+
+def has_valid_access_token() -> bool:
+    """Return whether a non-expired access token exists without refreshing it."""
+    if config.is_mock_mode():
+        return True
+    token_result = st.session_state.get(TOKEN_STATE_KEY) or {}
+    access_token = token_result.get("access_token")
+    expires_at = int(token_result.get("expires_at") or 0)
+    return bool(access_token and expires_at > int(time.time()) + 60)
+
+
+def granted_scopes(token_result: dict[str, Any] | None = None) -> list[str]:
+    """Return granted scope names from MSAL result or the JWT scp claim."""
+    token_data = token_result if token_result is not None else st.session_state.get(TOKEN_STATE_KEY, {})
+    scope_text = str((token_data or {}).get("scope") or "").strip()
+    scopes = [scope for scope in scope_text.split() if scope]
+    if scopes:
+        return sorted(set(scopes), key=str.lower)
+
+    access_token = str((token_data or {}).get("access_token") or "")
+    claims = _decode_jwt_payload(access_token)
+    claim_scopes = str(claims.get("scp") or "").strip()
+    return sorted({scope for scope in claim_scopes.split() if scope}, key=str.lower)
+
+
+def has_granted_scope(scope_name: str, token_result: dict[str, Any] | None = None) -> bool:
+    """Return whether a granted delegated scope is present, case-insensitively."""
+    wanted = scope_name.lower()
+    return any(scope.lower() == wanted for scope in granted_scopes(token_result))
 
 
 def connected_user() -> dict[str, Any]:
@@ -168,11 +215,33 @@ def _store_token_result(result: dict[str, Any]) -> None:
         st.session_state[ACCOUNT_STATE_KEY] = result["account"]
 
 
-def _friendly_auth_error(result: dict[str, Any]) -> str:
-    """Convert MSAL token errors into useful, non-sensitive messages."""
-    return _friendly_error_text(
-        str(result.get("error_description") or result.get("error") or "Microsoft sign-in failed.")
-    )
+def _format_token_error(result: dict[str, Any]) -> str:
+    """Return the actual Microsoft token error fields without token secrets."""
+    error = str(result.get("error") or "token_error")
+    description = str(result.get("error_description") or result.get("suberror") or "Microsoft token request failed.")
+    return f"Microsoft token error: {error}. {description}"
+
+
+def _format_query_error(params: Any) -> str:
+    """Return the actual Microsoft redirect error fields without authorization codes."""
+    error = str(params.get("error") or "authorization_error")
+    description = str(params.get("error_description") or "Microsoft sign-in failed.")
+    return f"Microsoft sign-in error: {error}. {description}"
+
+
+def _decode_jwt_payload(access_token: str) -> dict[str, Any]:
+    """Decode JWT payload claims for diagnostics only; this does not verify the signature."""
+    parts = access_token.split(".")
+    if len(parts) < 2:
+        return {}
+    payload = parts[1]
+    padding = "=" * (-len(payload) % 4)
+    try:
+        decoded = base64.urlsafe_b64decode(f"{payload}{padding}")
+        claims = json.loads(decoded.decode("utf-8"))
+    except (ValueError, json.JSONDecodeError):
+        return {}
+    return claims if isinstance(claims, dict) else {}
 
 
 def _friendly_error_text(message: str) -> str:
