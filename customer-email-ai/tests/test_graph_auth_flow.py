@@ -2,12 +2,21 @@
 
 from __future__ import annotations
 
+import base64
+import json
 import time
 from typing import Any
 
 import config
 from services import graph_auth
 from storage import database
+
+
+def _graph_access_token() -> str:
+    """Return a JWT-shaped Microsoft Graph access token for tests."""
+    return _unsigned_jwt_with_claims(
+        {"aud": "https://graph.microsoft.com", "tid": "tenant-1", "scp": "User.Read Mail.Read"}
+    )
 
 
 class FakeQueryParams(dict):
@@ -74,7 +83,7 @@ class FakeMsalApp:
             }
         ]
         self.result = result or {
-            "access_token": "header.payload.signature",
+            "access_token": _graph_access_token(),
             "scope": "User.Read Mail.Read",
             "expires_in": 3600,
             "account": dict(self.accounts[0]),
@@ -116,9 +125,8 @@ class FakeMsalApp:
         self.silent_calls += 1
         if self.silent_result is not None:
             return dict(self.silent_result)
-        token = "renewed-token" if force_refresh else "silent-token"
         return {
-            "access_token": token,
+            "access_token": _graph_access_token(),
             "scope": " ".join(scopes),
             "expires_in": 3600,
             "account": dict(account),
@@ -238,7 +246,7 @@ def test_missing_flow_with_valid_session_token_returns_success(monkeypatch) -> N
     fake_st = FakeStreamlit()
     _configure_live_auth(monkeypatch, fake_st)
     fake_st.session_state[graph_auth.TOKEN_STATE_KEY] = {
-        "access_token": "session-token",
+        "access_token": _graph_access_token(),
         "scope": "User.Read Mail.Read",
         "expires_at": int(time.time()) + 3600,
     }
@@ -292,7 +300,8 @@ def test_cache_restored_after_new_streamlit_session(monkeypatch) -> None:
     new_fake_st = FakeStreamlit()
     monkeypatch.setattr(graph_auth, "st", new_fake_st)
 
-    assert graph_auth.get_valid_access_token() == "silent-token"
+    assert graph_auth.get_valid_access_token()
+    assert graph_auth.is_graph_access_token()
     assert graph_auth.token_exists()
     assert new_fake_st.session_state[graph_auth.SILENT_RESULT_STATE_KEY] == "access_token"
 
@@ -307,7 +316,8 @@ def test_silent_token_renewal_force_refresh(monkeypatch) -> None:
         123,
     )
 
-    assert graph_auth.acquire_token_silent_once(force_refresh=True) == "renewed-token"
+    assert graph_auth.acquire_token_silent_once(force_refresh=True)
+    assert graph_auth.is_graph_access_token()
 
 
 def test_missing_or_expired_token_keeps_persisted_cache(monkeypatch) -> None:

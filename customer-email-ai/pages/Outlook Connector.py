@@ -262,11 +262,18 @@ def _render_safe_diagnostics() -> None:
                 "Cache saved after callback": diagnostics.get("cache_saved_after_callback", "No"),
                 "Token cache owner": diagnostics.get("cache_owner", "unknown"),
                 "Stored account metadata": diagnostics.get("stored_account", "No"),
+                "Token audience": diagnostics.get("session_token_aud", ""),
+                "Graph audience valid": diagnostics.get("session_token_graph_audience_valid", "No"),
+                "Token tenant ID": diagnostics.get("session_token_tid", ""),
+                "Token expired": diagnostics.get("session_token_expired", "No"),
             }
         )
     with st.expander("Outlook diagnostics", expanded=False):
         for label, value in rows.items():
             st.write(f"**{label}:** {value}")
+        if not config.is_mock_mode() and st.button("Clear old Outlook token cache"):
+            graph_auth.logout_user(clear_persisted=True)
+            st.rerun()
 
 
 def _tenant_from_authority_path(path: str) -> str:
@@ -510,8 +517,10 @@ def _friendly_exception_message(exc: Exception) -> str:
     if isinstance(exc, graph_client.GraphApiError):
         code = exc.code or "GraphError"
         message = _sanitize_exception_message(exc.graph_message or str(exc))
-        if exc.status_code == 401 and code.lower() == "invalidauthenticationtoken":
-            return "Your Outlook session expired. Please sign in again."
+        if exc.status_code == 401:
+            message = message.rstrip(".")
+            audience = graph_auth.access_token_audience() or "missing"
+            return f"Microsoft Graph HTTP 401 {code}: {message}. Token audience: {audience}"
         if exc.status_code == 403 and _is_graph_permission_error(str(exc).lower()):
             return "The Mail.Read permission is missing or has not been approved."
         return f"Microsoft Graph HTTP {exc.status_code} {code}: {message}"

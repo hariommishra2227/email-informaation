@@ -111,8 +111,8 @@ AUTHORITY = RESOLVED_AUTHORITY
 AZURE_TENANT_ID = TENANT_ID
 
 GRAPH_SCOPES = [
-    "User.Read",
-    "Mail.Read",
+    "https://graph.microsoft.com/User.Read",
+    "https://graph.microsoft.com/Mail.Read",
 ]
 OUTLOOK_MODE = OUTLOOK_MODE_LIVE if CONFIGURED_OUTLOOK_MODE == OUTLOOK_MODE_LIVE else OUTLOOK_MODE_MOCK
 APP_PAGE_ICON = "📧"

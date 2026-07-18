@@ -64,7 +64,10 @@ def test_only_invalid_authentication_token_maps_to_session_expired() -> None:
         "The mailbox is inactive or expired.",
     )
 
-    assert page._friendly_exception_message(expired_session) == "Your Outlook session expired. Please sign in again."
+    assert page._friendly_exception_message(expired_session) == (
+        "Microsoft Graph HTTP 401 InvalidAuthenticationToken: "
+        "Access token has expired. Token audience: missing"
+    )
     assert page._friendly_exception_message(mailbox_error) == (
         "Microsoft Graph HTTP 404 MailboxNotEnabledForRESTAPI: The mailbox is inactive or expired."
     )

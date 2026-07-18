@@ -21,9 +21,34 @@ def test_has_granted_scope_accepts_msal_scope_field_case_insensitively() -> None
     assert graph_auth.has_granted_scope("Mail.Read", token_result)
 
 
+def test_has_granted_scope_accepts_graph_resource_scopes() -> None:
+    """MSAL can return fully qualified Microsoft Graph scope names."""
+    token_result = {
+        "scope": "https://graph.microsoft.com/User.Read https://graph.microsoft.com/Mail.Read"
+    }
+
+    assert graph_auth.has_granted_scope("Mail.Read", token_result)
+
+
 def test_granted_scopes_falls_back_to_jwt_scp_claim() -> None:
     """JWT scp can be decoded for diagnostics without signature verification."""
     token_result = {"access_token": _unsigned_jwt_with_claims({"scp": "User.Read Mail.Read"})}
 
     assert graph_auth.granted_scopes(token_result) == ["Mail.Read", "User.Read"]
     assert graph_auth.has_granted_scope("mail.read", token_result)
+
+
+def test_graph_access_token_validates_accepted_audiences() -> None:
+    graph_url_token = {
+        "access_token": _unsigned_jwt_with_claims({"aud": "https://graph.microsoft.com"})
+    }
+    graph_app_id_token = {
+        "access_token": _unsigned_jwt_with_claims({"aud": "00000003-0000-0000-c000-000000000000"})
+    }
+    wrong_token = {
+        "access_token": _unsigned_jwt_with_claims({"aud": "api://example"})
+    }
+
+    assert graph_auth.is_graph_access_token(graph_url_token)
+    assert graph_auth.is_graph_access_token(graph_app_id_token)
+    assert not graph_auth.is_graph_access_token(wrong_token)

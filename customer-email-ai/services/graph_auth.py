@@ -33,7 +33,14 @@ AUTH_ERROR_STATE_KEY = "outlook_auth_error"
 CALLBACK_CACHE_SAVED_STATE_KEY = "outlook_callback_cache_saved"
 SILENT_RESULT_STATE_KEY = "outlook_silent_token_result"
 REQUIRED_MAIL_SCOPE = "Mail.Read"
-SILENT_TOKEN_SCOPES = ["User.Read", "Mail.Read"]
+SILENT_TOKEN_SCOPES = [
+    "https://graph.microsoft.com/User.Read",
+    "https://graph.microsoft.com/Mail.Read",
+]
+MICROSOFT_GRAPH_AUDIENCES = {
+    "https://graph.microsoft.com",
+    "00000003-0000-0000-c000-000000000000",
+}
 AUTH_FLOW_TTL_SECONDS = 600
 
 
@@ -111,14 +118,15 @@ def acquire_token_by_authorization_code(code: str) -> dict[str, Any]:
     )
     if "access_token" not in result:
         raise RuntimeError(_format_token_error(result))
+    if not has_granted_scope(REQUIRED_MAIL_SCOPE, result):
+        granted = ", ".join(granted_scopes(result)) or "none"
+        raise RuntimeError(f"Microsoft token did not include {REQUIRED_MAIL_SCOPE}. Granted scopes: {granted}.")
+    _validate_graph_access_token(result)
     _store_token_result(result)
     _remember_callback_cache_saved(
         _persist_msal_token_cache(token_cache, _account_from_result_or_cache(result, app, stored_account))
     )
     _verify_persisted_msal_cache()
-    if not has_granted_scope(REQUIRED_MAIL_SCOPE, result):
-        granted = ", ".join(granted_scopes(result)) or "none"
-        raise RuntimeError(f"Microsoft token did not include {REQUIRED_MAIL_SCOPE}. Granted scopes: {granted}.")
     return result
 
 
@@ -144,14 +152,15 @@ def acquire_token_by_auth_code_flow(flow: dict[str, Any], callback_params: dict[
     )
     if "access_token" not in result:
         raise RuntimeError(_format_token_error(result))
+    if not has_granted_scope(REQUIRED_MAIL_SCOPE, result):
+        granted = ", ".join(granted_scopes(result)) or "none"
+        raise RuntimeError(f"Microsoft token did not include {REQUIRED_MAIL_SCOPE}. Granted scopes: {granted}.")
+    _validate_graph_access_token(result)
     _store_token_result(result)
     _remember_callback_cache_saved(
         _persist_msal_token_cache(token_cache, _account_from_result_or_cache(result, app, stored_account))
     )
     _verify_persisted_msal_cache()
-    if not has_granted_scope(REQUIRED_MAIL_SCOPE, result):
-        granted = ", ".join(granted_scopes(result)) or "none"
-        raise RuntimeError(f"Microsoft token did not include {REQUIRED_MAIL_SCOPE}. Granted scopes: {granted}.")
     return result
 
 
@@ -275,6 +284,10 @@ def acquire_token_silent_once(force_refresh: bool = False, clear_on_failure: boo
     result = _acquire_token_silent(app, account, SILENT_TOKEN_SCOPES, force_refresh=force_refresh)
     _persist_msal_token_cache(token_cache, account)
     if result and "access_token" in result:
+        if not has_granted_scope(REQUIRED_MAIL_SCOPE, result):
+            granted = ", ".join(granted_scopes(result)) or "none"
+            raise RuntimeError(f"Microsoft token did not include {REQUIRED_MAIL_SCOPE}. Granted scopes: {granted}.")
+        _validate_graph_access_token(result)
         _store_token_result(result)
         _persist_msal_token_cache(token_cache, _account_from_result_or_cache(result, app, account))
         _remember_silent_token_result("access_token")
@@ -331,6 +344,7 @@ def is_connected() -> bool:
         access_token
         and expires_at > int(time.time()) + 60
         and has_granted_scope(REQUIRED_MAIL_SCOPE, token_result)
+        and is_graph_access_token(token_result)
     ):
         LOGGER.info("Outlook is connected using current Streamlit session token.")
         return True
@@ -342,6 +356,7 @@ def is_connected() -> bool:
     connected = bool(
         silent_token
         and has_granted_scope(REQUIRED_MAIL_SCOPE)
+        and is_graph_access_token()
     )
     LOGGER.info("Outlook connected via persisted MSAL cache: %s.", connected)
     return connected
@@ -385,7 +400,20 @@ def granted_scopes(token_result: dict[str, Any] | None = None) -> list[str]:
 def has_granted_scope(scope_name: str, token_result: dict[str, Any] | None = None) -> bool:
     """Return whether a granted delegated scope is present, case-insensitively."""
     wanted = scope_name.lower()
-    return any(scope.lower() == wanted for scope in granted_scopes(token_result))
+    return any(_scope_name(scope).lower() == wanted for scope in granted_scopes(token_result))
+
+
+def access_token_audience(token_result: dict[str, Any] | None = None) -> str:
+    """Return the access token audience claim without exposing the token."""
+    token_data = token_result or st.session_state.get(TOKEN_STATE_KEY, {}) or {}
+    access_token = str(token_data.get("access_token") or "")
+    claims = _decode_jwt_payload(access_token)
+    return str(claims.get("aud") or "")
+
+
+def is_graph_access_token(token_result: dict[str, Any] | None = None) -> bool:
+    """Return whether the access token is issued for Microsoft Graph."""
+    return access_token_audience(token_result) in MICROSOFT_GRAPH_AUDIENCES
 
 
 def connected_user() -> dict[str, Any]:
@@ -427,17 +455,20 @@ def auth_error() -> str:
 
 def auth_diagnostics() -> dict[str, str]:
     """Return safe Outlook auth diagnostics without exposing token material."""
+    token_diagnostics = _session_token_diagnostics()
     if config.is_mock_mode():
-        return {
+        diagnostics = {
             "persisted_cache_exists": "No",
             "accounts_found": "0",
             "silent_token_result": "mock",
             "cache_saved_after_callback": "No",
         }
+        diagnostics.update(token_diagnostics)
+        return diagnostics
     try:
         cache_json, stored_account = database.load_oauth_token_cache(_token_cache_owner())
     except Exception:
-        return {
+        diagnostics = {
             "persisted_cache_exists": "Unknown",
             "accounts_found": "0",
             "silent_token_result": "database_error",
@@ -445,6 +476,8 @@ def auth_diagnostics() -> dict[str, str]:
             "cache_owner": _token_cache_owner(),
             "stored_account": "Unknown",
         }
+        diagnostics.update(token_diagnostics)
+        return diagnostics
     accounts_count = 0
     try:
         token_cache = _new_msal_token_cache()
@@ -456,7 +489,7 @@ def auth_diagnostics() -> dict[str, str]:
         st.session_state[AUTH_ERROR_STATE_KEY] = _format_token_error(
             {"error": exc.__class__.__name__, "error_description": str(exc)}
         )
-    return {
+    diagnostics = {
         "persisted_cache_exists": "Yes" if cache_json else "No",
         "accounts_found": str(accounts_count),
         "silent_token_result": str(_session_state_get(SILENT_RESULT_STATE_KEY) or "not_run"),
@@ -464,6 +497,8 @@ def auth_diagnostics() -> dict[str, str]:
         "cache_owner": _token_cache_owner(),
         "stored_account": "Yes" if stored_account else "No",
     }
+    diagnostics.update(token_diagnostics)
+    return diagnostics
 
 
 def _store_token_result(result: dict[str, Any]) -> None:
@@ -592,11 +627,13 @@ def _session_token_diagnostics() -> dict[str, str]:
     now = int(time.time())
     claims = _decode_jwt_payload(access_token)
     scopes = str(claims.get("scp") or token_result.get("scope") or "").strip()
+    audience = access_token_audience(token_result)
     return {
         "session_token_exists": "Yes" if access_token else "No",
         "session_token_expires_at": str(expires_at or ""),
         "session_token_expired": "Yes" if expires_at and expires_at <= now + 60 else "No",
-        "session_token_aud": str(claims.get("aud") or ""),
+        "session_token_aud": audience,
+        "session_token_graph_audience_valid": "Yes" if audience in MICROSOFT_GRAPH_AUDIENCES else "No",
         "session_token_tid": str(claims.get("tid") or ""),
         "session_token_scopes": ", ".join(scope for scope in scopes.split() if scope),
         "session_current_timestamp": str(now),
@@ -703,6 +740,22 @@ def _safe_code_debug(value: Any) -> str:
     if not code:
         return "present=False"
     return f"present=True length={len(code)} sha256={_safe_fingerprint(code)}"
+
+
+def _scope_name(scope: str) -> str:
+    """Return a scope's short delegated permission name."""
+    return str(scope or "").rstrip("/").split("/")[-1]
+
+
+def _validate_graph_access_token(result: dict[str, Any]) -> None:
+    """Reject access tokens that were not issued for Microsoft Graph."""
+    if is_graph_access_token(result):
+        return
+    audience = access_token_audience(result) or "missing"
+    raise RuntimeError(
+        "Microsoft issued an access token for the wrong resource. "
+        f"Token audience: {audience}. Expected Microsoft Graph."
+    )
 
 
 def _format_token_error(result: dict[str, Any]) -> str:
