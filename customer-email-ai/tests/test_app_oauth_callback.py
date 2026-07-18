@@ -70,7 +70,7 @@ def _configure_root_app(monkeypatch, fake_st: FakeStreamlit) -> None:
     monkeypatch.setattr(app, "initialize_session_state", lambda: None)
     monkeypatch.setattr(app, "render_styles", lambda: None)
     monkeypatch.setattr(config, "is_mock_mode", lambda: False)
-    monkeypatch.setattr(config, "APP_PAGE_ICON", "icon")
+    monkeypatch.setattr(config, "APP_PAGE_ICON", "icon", raising=False)
     monkeypatch.setattr(config, "APP_USER_EMAIL", "user@example.com")
     monkeypatch.setattr(page_context, "initialize_outlook_session_state", lambda: None)
     monkeypatch.setattr(page_context, "initialize_database_safely", lambda: False)
