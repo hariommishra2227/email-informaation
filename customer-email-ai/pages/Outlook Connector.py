@@ -7,6 +7,7 @@ import logging
 from pathlib import Path
 import re
 import traceback
+from typing import Any
 from urllib.parse import urlparse
 
 import pandas as pd
@@ -25,6 +26,38 @@ except Exception as exc:  # pragma: no cover
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+def initialize_outlook_session_state() -> None:
+    """Create Outlook session defaults before any UI or Graph logic runs."""
+    defaults: dict[str, Any] = {
+        "imported_outlook_message_ids": [],
+        "outlook_messages_cache": [],
+        "outlook_import_summary": None,
+        "selected_outlook_messages": [],
+        "outlook_selected_messages": [],
+        "outlook_token_result": {},
+        "outlook_access_token": None,
+        "outlook_account": {},
+        "outlook_connected_account": None,
+        "outlook_connected_user": {},
+        "outlook_auth_state": "",
+        "outlook_auth_error": "",
+    }
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = _new_session_default(value)
+
+
+def _new_session_default(value: Any) -> Any:
+    """Return a fresh default for mutable session values."""
+    if isinstance(value, list):
+        return list(value)
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, set):
+        return set(value)
+    return value
 
 
 def _date_value(value: str) -> date:
@@ -46,6 +79,7 @@ def _format_received(value: str) -> str:
 
 def render(user_id: str) -> None:
     """Render the Outlook Inbox page."""
+    initialize_outlook_session_state()
     st.title("Customer Email Extraction")
     st.caption("Outlook Connection -> Inbox Emails -> Select Emails -> Extract Customer Information -> Review Extracted Records -> Save to Customer Registry -> Download Excel")
     if IMPORT_ERROR is not None:
@@ -53,15 +87,11 @@ def render(user_id: str) -> None:
         st.error("Outlook Connector could not load. Please check the application setup.")
         return
 
-    st.session_state.setdefault("imported_outlook_message_ids", [])
-    st.session_state.setdefault("outlook_messages_cache", [])
-    st.session_state.setdefault("outlook_import_summary", None)
-    st.session_state.setdefault("selected_outlook_messages", [])
-
     can_load_inbox = _render_connection_panel()
     if not can_load_inbox:
-        st.session_state.outlook_messages_cache = []
-        st.session_state.selected_outlook_messages = []
+        st.session_state["outlook_messages_cache"] = []
+        st.session_state["selected_outlook_messages"] = []
+        st.session_state["outlook_selected_messages"] = []
         return
 
     st.write("")
@@ -80,16 +110,17 @@ def render(user_id: str) -> None:
         st.error(_safe_render_exception_message(exc, "Outlook quick actions"))
         return
 
-    if can_load_inbox and (refresh_clicked or not st.session_state.outlook_messages_cache):
+    cached_messages = st.session_state.get("outlook_messages_cache", [])
+    if can_load_inbox and (refresh_clicked or not cached_messages):
         try:
             messages = graph_client.list_inbox_messages(user_id, limit=int(limit))
-            st.session_state.outlook_messages_cache = messages
+            st.session_state["outlook_messages_cache"] = messages
         except Exception as exc:
             LOGGER.exception("Outlook inbox refresh failed.")
             st.error(_friendly_exception_message(exc))
-            messages = st.session_state.outlook_messages_cache[: int(limit)]
+            messages = st.session_state.get("outlook_messages_cache", [])[: int(limit)]
     else:
-        messages = st.session_state.outlook_messages_cache[: int(limit)]
+        messages = cached_messages[: int(limit)]
 
     for message in messages:
         try:
@@ -180,8 +211,10 @@ def _render_connection_panel() -> bool:
         disconnect_disabled = not (graph_auth.token_exists() or graph_auth.connected_user() or graph_auth.auth_error())
         if st.button("Disconnect", disabled=disconnect_disabled, use_container_width=True):
             graph_auth.logout_user()
-            st.session_state.outlook_messages_cache = []
-            st.session_state.selected_outlook_messages = []
+            initialize_outlook_session_state()
+            st.session_state["outlook_messages_cache"] = []
+            st.session_state["selected_outlook_messages"] = []
+            st.session_state["outlook_selected_messages"] = []
             st.rerun()
 
     _render_safe_diagnostics()
@@ -324,12 +357,14 @@ def _render_inbox_list(messages: list, status_rows: dict[str, str]) -> list[str]
     st.subheader("Select Emails")
     if not messages:
         st.info("No emails found for the selected filters.")
-        st.session_state.selected_outlook_messages = []
+        st.session_state["selected_outlook_messages"] = []
+        st.session_state["outlook_selected_messages"] = []
         return []
 
+    selected_message_ids = st.session_state.get("selected_outlook_messages", [])
     table_rows = [
         {
-            "Select": message.message_id in st.session_state.selected_outlook_messages,
+            "Select": message.message_id in selected_message_ids,
             "Sender": message.sender_name,
             "Sender Email": message.sender_email,
             "Subject": message.subject,
@@ -353,7 +388,8 @@ def _render_inbox_list(messages: list, status_rows: dict[str, str]) -> list[str]
         },
     )
     selected_ids = edited.loc[edited["Select"], "Message ID"].tolist() if not edited.empty else []
-    st.session_state.selected_outlook_messages = selected_ids
+    st.session_state["selected_outlook_messages"] = selected_ids
+    st.session_state["outlook_selected_messages"] = selected_ids
     st.caption(f"{len(messages)} fetched. {len(selected_ids)} selected. Status is refreshed after extraction.")
     return selected_ids
 
@@ -386,7 +422,7 @@ def _import_messages(user_id: str, messages: list, message_ids: list[str]) -> No
     }
     imported_ids = set(st.session_state.get("imported_outlook_message_ids", []))
     if not message_ids:
-        st.session_state.outlook_import_summary = summary
+        st.session_state["outlook_import_summary"] = summary
         st.warning("Select at least one email to import.")
         return
     progress = st.progress(0)
@@ -419,8 +455,8 @@ def _import_messages(user_id: str, messages: list, message_ids: list[str]) -> No
             LOGGER.exception("Outlook message import failed.")
             summary["failed_records"] += 1
         progress.progress(index / len(message_ids))
-    st.session_state.imported_outlook_message_ids = sorted(imported_ids)
-    st.session_state.outlook_import_summary = summary
+    st.session_state["imported_outlook_message_ids"] = sorted(imported_ids)
+    st.session_state["outlook_import_summary"] = summary
 
 
 def _render_import_result() -> None:
@@ -600,6 +636,7 @@ def _sanitize_exception_message(message: str) -> str:
 def render_page() -> None:
     """Standalone Streamlit multipage entrypoint."""
     st.set_page_config(page_title="Outlook Connector", page_icon="@", layout="wide")
+    initialize_outlook_session_state()
     try:
         from page_context import ensure_user_safely, initialize_database_safely, selected_user
 

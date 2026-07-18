@@ -56,7 +56,7 @@ def create_login_url() -> str:
     _clear_callback_query_params()
     now = int(time.time())
     database.delete_expired_oauth_auth_flows(now)
-    st.session_state.pop(AUTH_ERROR_STATE_KEY, None)
+    st.session_state[AUTH_ERROR_STATE_KEY] = ""
 
     flow_id = secrets.token_urlsafe(32)
     token_cache, _account = _load_msal_token_cache()
@@ -131,7 +131,7 @@ def handle_auth_callback() -> bool:
         if flow_id:
             database.delete_oauth_auth_flow(flow_id)
         st.session_state[AUTH_ERROR_STATE_KEY] = _format_query_error(params)
-        st.session_state.pop(AUTH_STATE_KEY, None)
+        st.session_state[AUTH_STATE_KEY] = ""
         _clear_callback_query_params()
         return False
     code = params.get("code")
@@ -141,32 +141,32 @@ def handle_auth_callback() -> bool:
     flow_id = str(params.get("state") or "")
     if not flow_id:
         st.session_state[AUTH_ERROR_STATE_KEY] = "Microsoft sign-in did not include a state value. Please connect Outlook again."
-        st.session_state.pop(AUTH_STATE_KEY, None)
+        st.session_state[AUTH_STATE_KEY] = ""
         _clear_callback_query_params()
         return False
 
     status, flow = database.consume_oauth_auth_flow(flow_id, now=int(time.time()))
     if status == "missing":
         st.session_state[AUTH_ERROR_STATE_KEY] = "Microsoft sign-in flow was not found or was already used. Please connect Outlook again."
-        st.session_state.pop(AUTH_STATE_KEY, None)
+        st.session_state[AUTH_STATE_KEY] = ""
         _clear_callback_query_params()
         return False
     if status == "expired":
         st.session_state[AUTH_ERROR_STATE_KEY] = "Microsoft sign-in flow expired. Please connect Outlook again."
-        st.session_state.pop(AUTH_STATE_KEY, None)
+        st.session_state[AUTH_STATE_KEY] = ""
         _clear_callback_query_params()
         return False
 
     try:
         acquire_token_by_auth_code_flow(flow or {}, params)
-        st.session_state.pop(AUTH_STATE_KEY, None)
+        st.session_state[AUTH_STATE_KEY] = ""
         _clear_callback_query_params()
-        st.session_state.pop(AUTH_ERROR_STATE_KEY, None)
+        st.session_state[AUTH_ERROR_STATE_KEY] = ""
         _rerun_after_callback()
         return True
     except Exception as exc:
         st.session_state[AUTH_ERROR_STATE_KEY] = str(exc)
-        st.session_state.pop(AUTH_STATE_KEY, None)
+        st.session_state[AUTH_STATE_KEY] = ""
         _clear_callback_query_params()
         return False
 
@@ -216,10 +216,15 @@ def acquire_token_silent_once(force_refresh: bool = False, clear_on_failure: boo
 
 def logout_user() -> None:
     """Disconnect Outlook by removing account and token data from session state."""
-    for key in (TOKEN_STATE_KEY, ACCOUNT_STATE_KEY, USER_STATE_KEY, AUTH_STATE_KEY, AUTH_ERROR_STATE_KEY):
-        st.session_state.pop(key, None)
-    for key in ("outlook_messages_cache", "selected_outlook_messages", "outlook_import_summary"):
-        st.session_state.pop(key, None)
+    st.session_state[TOKEN_STATE_KEY] = {}
+    st.session_state[ACCOUNT_STATE_KEY] = {}
+    st.session_state[USER_STATE_KEY] = {}
+    st.session_state[AUTH_STATE_KEY] = ""
+    st.session_state[AUTH_ERROR_STATE_KEY] = ""
+    st.session_state["outlook_messages_cache"] = []
+    st.session_state["selected_outlook_messages"] = []
+    st.session_state["outlook_selected_messages"] = []
+    st.session_state["outlook_import_summary"] = None
     _clear_persisted_auth()
 
 
