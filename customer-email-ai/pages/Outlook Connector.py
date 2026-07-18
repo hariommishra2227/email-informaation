@@ -522,7 +522,10 @@ def _friendly_exception_message(exc: Exception) -> str:
             audience = graph_auth.access_token_audience() or "missing"
             authenticate_header = _sanitize_exception_message(getattr(exc, "authenticate_header", "") or "")
             header_detail = f". WWW-Authenticate: {authenticate_header}" if authenticate_header else ""
-            return f"Microsoft Graph HTTP 401 {code}: {message}. Token audience: {audience}{header_detail}"
+            return (
+                f"Microsoft Graph HTTP 401 {code}: {message}. Token audience: {audience}{header_detail}\n\n"
+                f"{_format_graph_request_diagnostic(getattr(exc, 'diagnostics', {}) or {})}"
+            )
         if exc.status_code == 403 and _is_graph_permission_error(str(exc).lower()):
             return "The Mail.Read permission is missing or has not been approved."
         return f"Microsoft Graph HTTP {exc.status_code} {code}: {message}"
@@ -557,6 +560,28 @@ def _safe_auth_exception_message(exc: Exception) -> str:
     if "msal" in lower or "authorization" in lower or "oauth" in lower or "login" in lower:
         return _safe_exception_detail(exc, message)
     return _safe_exception_detail(exc, message)
+
+
+def _format_graph_request_diagnostic(diagnostics: dict[str, str]) -> str:
+    """Return the safe Microsoft Graph request diagnostic block."""
+    rows = {
+        "Request URL": diagnostics.get("Request URL", ""),
+        "Authorization Header Present": diagnostics.get("Authorization Header Present", ""),
+        "Bearer Prefix": diagnostics.get("Bearer Prefix", ""),
+        "Token Length": diagnostics.get("Token Length", ""),
+        "Token Expired": diagnostics.get("Token Expired", ""),
+        "Silent Token Used": diagnostics.get("Silent Token Used", ""),
+        "HTTP Status": diagnostics.get("HTTP Status", ""),
+        "WWW-Authenticate": diagnostics.get("WWW-Authenticate", ""),
+        "Graph Error Code": diagnostics.get("Graph Error Code", ""),
+        "Graph Error Message": diagnostics.get("Graph Error Message", ""),
+        "Response Headers": diagnostics.get("Response Headers", ""),
+        "Response Body": diagnostics.get("Response Body", ""),
+    }
+    lines = ["Graph Request", "-------------"]
+    for label, value in rows.items():
+        lines.append(f"{label}: {_sanitize_exception_message(str(value or ''))}")
+    return "\n".join(lines)
 
 
 def _friendly_auth_error_message(lower: str) -> str:

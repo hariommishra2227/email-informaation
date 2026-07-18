@@ -64,10 +64,12 @@ def test_only_invalid_authentication_token_maps_to_session_expired() -> None:
         "The mailbox is inactive or expired.",
     )
 
-    assert page._friendly_exception_message(expired_session) == (
+    expired_message = page._friendly_exception_message(expired_session)
+    assert (
         "Microsoft Graph HTTP 401 InvalidAuthenticationToken: "
         "Access token has expired. Token audience: missing"
-    )
+    ) in expired_message
+    assert "Graph Request" in expired_message
     assert page._friendly_exception_message(mailbox_error) == (
         "Microsoft Graph HTTP 404 MailboxNotEnabledForRESTAPI: The mailbox is inactive or expired."
     )
@@ -93,6 +95,7 @@ def test_graph_401_shows_safe_authenticate_header(monkeypatch) -> None:
     assert "Microsoft Graph HTTP 401 InvalidAuthenticationToken: Token validation failed." in message
     assert "Token audience: https://graph.microsoft.com" in message
     assert "WWW-Authenticate:" in message
+    assert "Graph Request" in message
     assert "[redacted-token]" in message
     assert "secret-refresh-token" not in message
 
