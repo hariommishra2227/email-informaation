@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from datetime import date, datetime
-from html import escape as html_escape
 import logging
 from pathlib import Path
 import re
@@ -168,13 +167,19 @@ def _render_connection_panel() -> bool:
         if config.is_mock_mode() or login_disabled:
             st.button("Sign in with Outlook", disabled=True, use_container_width=True)
         elif not graph_auth.is_connected():
-            if st.button("Sign in with Outlook", type="primary", use_container_width=True):
-                try:
-                    _redirect_to_microsoft_login(graph_auth.create_login_url())
-                except Exception as exc:
-                    LOGGER.exception("Could not create Microsoft login URL.")
-                    st.error(_safe_auth_exception_message(exc))
-                    _render_login_url_diagnostics(exc)
+            try:
+                authorization_url = graph_auth.create_login_url()
+                st.link_button(
+                    "Sign in with Outlook",
+                    authorization_url,
+                    type="primary",
+                    icon="🔐",
+                    use_container_width=True,
+                )
+            except Exception as exc:
+                LOGGER.exception("Could not create Microsoft login URL.")
+                st.error(_safe_auth_exception_message(exc))
+                _render_login_url_diagnostics(exc)
         else:
             st.button("Sign in with Outlook", disabled=True, use_container_width=True)
     with status_cols[4]:
@@ -215,16 +220,6 @@ def _render_connection_panel() -> bool:
         return False
 
     return True
-
-
-def _redirect_to_microsoft_login(auth_url: str) -> None:
-    """Redirect the current Streamlit page to Microsoft without exposing secrets."""
-    safe_url = html_escape(auth_url, quote=True)
-    st.markdown(
-        f'<meta http-equiv="refresh" content="0; url={safe_url}">',
-        unsafe_allow_html=True,
-    )
-    st.info("Opening Microsoft sign-in...")
 
 
 def _login_is_disabled() -> bool:
