@@ -186,17 +186,25 @@ def handle_auth_callback() -> bool:
 
 
 def get_valid_access_token() -> str:
-    """Return a non-expired access token, renewing through MSAL when needed."""
+    """Return a usable access token, preferring the fresh Streamlit session token."""
     if config.is_mock_mode():
         return "mock-access-token"
+
     token_result = st.session_state.get(TOKEN_STATE_KEY, {}) or {}
     access_token = str(token_result.get("access_token") or "")
-    expires_at = int(token_result.get("expires_at") or 0)
+
+    try:
+        expires_at = int(token_result.get("expires_at") or 0)
+    except (TypeError, ValueError):
+        expires_at = 0
 
     if access_token and expires_at > int(time.time()) + 60:
         return access_token
 
-    silent_token = acquire_token_silent_once(force_refresh=False)
+    silent_token = acquire_token_silent_once(
+        force_refresh=False,
+        clear_on_failure=False,
+    )
     if silent_token:
         return silent_token
 
@@ -211,7 +219,6 @@ def acquire_token_silent_once(force_refresh: bool = False, clear_on_failure: boo
     app = _build_msal_app(token_cache)
     account = _select_account(app, stored_account)
     if not account:
-        _remember_silent_token_result("no_account")
         return None
 
     result = _acquire_token_silent(app, account, SILENT_TOKEN_SCOPES, force_refresh=force_refresh)
@@ -247,17 +254,33 @@ def logout_user(clear_persisted: bool = True) -> None:
 
 
 def is_connected() -> bool:
-    """Return whether the current Streamlit session has a usable Outlook token."""
+    """Return whether the current session or persisted cache has a usable token."""
     if config.is_mock_mode():
         return True
+
     token_result = st.session_state.get(TOKEN_STATE_KEY, {}) or {}
     access_token = str(token_result.get("access_token") or "")
-    expires_at = int(token_result.get("expires_at") or 0)
-    if access_token and expires_at > int(time.time()) + 60:
-        return has_granted_scope(REQUIRED_MAIL_SCOPE, token_result)
 
-    token = acquire_token_silent_once(force_refresh=False, clear_on_failure=False)
-    return bool(token and has_granted_scope(REQUIRED_MAIL_SCOPE))
+    try:
+        expires_at = int(token_result.get("expires_at") or 0)
+    except (TypeError, ValueError):
+        expires_at = 0
+
+    if (
+        access_token
+        and expires_at > int(time.time()) + 60
+        and has_granted_scope(REQUIRED_MAIL_SCOPE, token_result)
+    ):
+        return True
+
+    silent_token = acquire_token_silent_once(
+        force_refresh=False,
+        clear_on_failure=False,
+    )
+    return bool(
+        silent_token
+        and has_granted_scope(REQUIRED_MAIL_SCOPE)
+    )
 
 
 def token_exists() -> bool:

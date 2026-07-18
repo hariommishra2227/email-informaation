@@ -339,7 +339,6 @@ def test_missing_or_expired_token_keeps_persisted_cache(monkeypatch) -> None:
     assert graph_auth.acquire_token_silent_once(clear_on_failure=True) is None
     cache_json, _account = database.load_oauth_token_cache(config.DEFAULT_USER_ID)
     assert cache_json == '{"cached": true}'
-    assert fake_st.session_state[graph_auth.SILENT_RESULT_STATE_KEY] == "no_account"
 
 
 def test_passive_is_connected_check_does_not_delete_cache(monkeypatch) -> None:

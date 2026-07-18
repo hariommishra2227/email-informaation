@@ -132,7 +132,10 @@ def _graph_get(url: str, token: str, retry_on_unauthorized: bool = True) -> dict
         if renewed_token:
             return _graph_get(url, renewed_token, retry_on_unauthorized=False)
     if response.status_code == 401:
-        raise RuntimeError(_friendly_unauthorized_error(graph_error))
+        raise RuntimeError(
+            "Microsoft Graph rejected the current token. "
+            "Please reconnect Outlook if the problem continues."
+        )
     if response.status_code == 403:
         raise RuntimeError("Microsoft Graph permission denied. Mail.Read or admin consent may be required.")
     if response.status_code == 404:

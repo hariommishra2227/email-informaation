@@ -46,7 +46,6 @@ def test_first_graph_401_does_not_immediately_destroy_authentication(monkeypatch
 
     assert calls == {"silent": 1, "logout": 0}
     message = str(exc_info.value)
-    assert "Microsoft Graph 401" in message
-    assert "InvalidAuthenticationToken" in message
-    assert "Access token has expired" in message
+    assert "Microsoft Graph rejected the current token" in message
+    assert "Please reconnect Outlook if the problem continues" in message
     assert "expired-token" not in message
