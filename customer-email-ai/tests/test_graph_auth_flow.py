@@ -153,6 +153,7 @@ def test_auth_code_flow_successful_state_match(monkeypatch) -> None:
     assert graph_auth.handle_auth_callback()
     assert graph_auth.token_exists()
     assert fake_st.query_params == {}
+    assert fake_st.session_state[graph_auth.CALLBACK_CACHE_SAVED_STATE_KEY]
     cache_json, account = database.load_oauth_token_cache(config.DEFAULT_USER_ID)
     assert cache_json
     assert account["home_account_id"] == "home-1"
@@ -218,6 +219,7 @@ def test_cache_restored_after_new_streamlit_session(monkeypatch) -> None:
 
     assert graph_auth.get_valid_access_token() == "silent-token"
     assert graph_auth.token_exists()
+    assert new_fake_st.session_state[graph_auth.SILENT_RESULT_STATE_KEY] == "access_token"
 
 
 def test_silent_token_renewal_force_refresh(monkeypatch) -> None:
@@ -233,7 +235,7 @@ def test_silent_token_renewal_force_refresh(monkeypatch) -> None:
     assert graph_auth.acquire_token_silent_once(force_refresh=True) == "renewed-token"
 
 
-def test_missing_or_expired_token_clears_cache(monkeypatch) -> None:
+def test_missing_or_expired_token_keeps_persisted_cache(monkeypatch) -> None:
     fake_st = FakeStreamlit()
     empty_app = FakeMsalApp()
     empty_app.accounts = []
@@ -247,4 +249,5 @@ def test_missing_or_expired_token_clears_cache(monkeypatch) -> None:
 
     assert graph_auth.acquire_token_silent_once(clear_on_failure=True) is None
     cache_json, _account = database.load_oauth_token_cache(config.DEFAULT_USER_ID)
-    assert cache_json == ""
+    assert cache_json == '{"cached": true}'
+    assert fake_st.session_state[graph_auth.SILENT_RESULT_STATE_KEY] == "no_account"

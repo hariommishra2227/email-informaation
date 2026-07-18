@@ -126,11 +126,10 @@ def _graph_get(url: str, token: str, retry_on_unauthorized: bool = True) -> dict
         LOGGER.warning("Microsoft Graph network request failed: %s", exc.__class__.__name__)
         raise RuntimeError("Network failure while contacting Microsoft Graph.") from exc
     if response.status_code == 401 and retry_on_unauthorized:
-        renewed_token = graph_auth.acquire_token_silent_once(force_refresh=True, clear_on_failure=True)
+        renewed_token = graph_auth.acquire_token_silent_once(force_refresh=True)
         if renewed_token:
             return _graph_get(url, renewed_token, retry_on_unauthorized=False)
     if response.status_code == 401:
-        graph_auth.logout_user()
         raise RuntimeError("Your Microsoft session expired. Sign in again.")
     if response.status_code == 403:
         raise RuntimeError("Microsoft Graph permission denied. Mail.Read or admin consent may be required.")
@@ -157,6 +156,5 @@ def _friendly_graph_error(status_code: int, details: str) -> str:
     if "consent" in lower:
         return "Microsoft Graph permissions need administrator approval."
     if "token" in lower or "expired" in lower:
-        graph_auth.logout_user()
         return "Your Microsoft session expired. Please sign in again."
     return f"Microsoft Graph API failure ({status_code}). Please try again."
