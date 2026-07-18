@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from datetime import date, datetime
 import logging
+from pathlib import Path
 import re
+import traceback
 from urllib.parse import urlparse
 
 import pandas as pd
@@ -57,10 +59,26 @@ def render(user_id: str) -> None:
     st.session_state.setdefault("selected_outlook_messages", [])
 
     can_load_inbox = _render_connection_panel()
+    if not can_load_inbox:
+        st.session_state.outlook_messages_cache = []
+        st.session_state.selected_outlook_messages = []
+        return
+
     st.write("")
-    limit, search_text, read_filter, date_range = _render_filters()
+    try:
+        limit, search_text, read_filter, date_range = _render_filters()
+    except Exception as exc:
+        LOGGER.exception("Outlook filters failed to render.")
+        st.error(_safe_render_exception_message(exc, "Outlook filters"))
+        return
+
     st.write("")
-    refresh_clicked, import_selected_clicked, import_unread_clicked = _render_quick_actions(user_id)
+    try:
+        refresh_clicked, import_selected_clicked, import_unread_clicked = _render_quick_actions(user_id)
+    except Exception as exc:
+        LOGGER.exception("Outlook quick actions failed to render.")
+        st.error(_safe_render_exception_message(exc, "Outlook quick actions"))
+        return
 
     if can_load_inbox and (refresh_clicked or not st.session_state.outlook_messages_cache):
         try:
@@ -79,13 +97,23 @@ def render(user_id: str) -> None:
         except Exception:
             LOGGER.exception("Could not cache Outlook message metadata.")
 
-    status_rows = {
-        row["message_id"]: row["processing_status"]
-        for row in database.list_outlook_message_rows(user_id)
-    }
+    try:
+        status_rows = {
+            row["message_id"]: row["processing_status"]
+            for row in database.list_outlook_message_rows(user_id)
+        }
+    except Exception as exc:
+        LOGGER.exception("Could not read Outlook message status rows.")
+        st.error(_safe_render_exception_message(exc, "Outlook message status"))
+        return
 
-    filtered = _filter_messages(messages, search_text, read_filter, date_range)
-    selected_ids = _render_inbox_list(filtered, status_rows)
+    try:
+        filtered = _filter_messages(messages, search_text, read_filter, date_range)
+        selected_ids = _render_inbox_list(filtered, status_rows)
+    except Exception as exc:
+        LOGGER.exception("Outlook inbox list failed to render.")
+        st.error(_safe_render_exception_message(exc, "Outlook inbox list"))
+        return
 
     if import_selected_clicked:
         _import_messages(user_id, messages, selected_ids)
@@ -94,7 +122,11 @@ def render(user_id: str) -> None:
 
     _render_import_result()
     st.write("")
-    _render_customer_preview(user_id)
+    try:
+        _render_customer_preview(user_id)
+    except Exception as exc:
+        LOGGER.exception("Outlook customer preview failed to render.")
+        st.error(_safe_render_exception_message(exc, "Outlook customer preview"))
 
 
 def _render_connection_panel() -> bool:
@@ -529,6 +561,25 @@ def _safe_exception_detail(exc: Exception, message: str | None = None) -> str:
     return f"{exc.__class__.__name__}: {safe_message}"
 
 
+def _safe_render_exception_message(exc: Exception, section: str = "Outlook Connector") -> str:
+    """Return a safe render diagnostic with exception type and source location."""
+    location = _exception_location(exc)
+    return f"{section} failed at {location}. {_safe_exception_detail(exc)}"
+
+
+def _exception_location(exc: Exception) -> str:
+    """Return the deepest traceback frame without exposing sensitive values."""
+    traceback_entries = traceback.extract_tb(exc.__traceback__)
+    if not traceback_entries:
+        return "unknown file:unknown line"
+    entry = traceback_entries[-1]
+    try:
+        filename = str(Path(entry.filename).resolve().relative_to(Path.cwd().resolve()))
+    except ValueError:
+        filename = Path(entry.filename).name
+    return f"{filename}:{entry.lineno}"
+
+
 def _sanitize_exception_message(message: str) -> str:
     """Remove OAuth secrets and token-like values from a diagnostic message."""
     sanitized = str(message)
@@ -561,7 +612,7 @@ def render_page() -> None:
     except Exception as exc:
         LOGGER.exception("Outlook Connector failed to render.")
         st.title("Customer Email Extraction")
-        st.error("Outlook Connector could not render. Please try again.")
+        st.error(_safe_render_exception_message(exc))
 
 
 if __name__ == "__main__":
