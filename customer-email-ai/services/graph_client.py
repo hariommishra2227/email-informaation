@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 import requests
@@ -125,25 +126,67 @@ def _graph_get(url: str, token: str, retry_on_unauthorized: bool = True) -> dict
     except requests.RequestException as exc:
         LOGGER.warning("Microsoft Graph network request failed: %s", exc.__class__.__name__)
         raise RuntimeError("Network failure while contacting Microsoft Graph.") from exc
+    graph_error = _graph_error_details(response)
     if response.status_code == 401 and retry_on_unauthorized:
         renewed_token = graph_auth.acquire_token_silent_once(force_refresh=True)
         if renewed_token:
             return _graph_get(url, renewed_token, retry_on_unauthorized=False)
     if response.status_code == 401:
-        raise RuntimeError("Your Microsoft session expired. Sign in again.")
+        raise RuntimeError(_friendly_unauthorized_error(graph_error))
     if response.status_code == 403:
         raise RuntimeError("Microsoft Graph permission denied. Mail.Read or admin consent may be required.")
     if response.status_code == 404:
         raise RuntimeError("Mailbox unavailable for this Microsoft account.")
     if response.status_code >= 400:
         try:
-            error = response.json().get("error", {})
-            details = str(error.get("message") or error.get("code") or response.reason)
+            details = graph_error["message"] or graph_error["code"] or response.reason
         except ValueError:
             details = response.reason
         LOGGER.warning("Microsoft Graph returned HTTP %s: %s", response.status_code, details)
         raise RuntimeError(_friendly_graph_error(response.status_code, details))
     return response.json()
+
+
+def _graph_error_details(response: requests.Response) -> dict[str, str]:
+    """Return sanitized Microsoft Graph error code and message."""
+    code = ""
+    message = ""
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = {}
+    if isinstance(payload, dict):
+        error = payload.get("error") or {}
+        if isinstance(error, dict):
+            code = str(error.get("code") or "")
+            message = str(error.get("message") or "")
+    return {
+        "code": _sanitize_graph_error(code),
+        "message": _sanitize_graph_error(message or response.reason or ""),
+    }
+
+
+def _friendly_unauthorized_error(graph_error: dict[str, str]) -> str:
+    """Return a safe 401 diagnostic without clearing persisted auth."""
+    code = graph_error.get("code") or "Unauthorized"
+    message = graph_error.get("message") or "Microsoft Graph rejected the access token."
+    return f"Microsoft Graph 401: {code}. {message}"
+
+
+def _sanitize_graph_error(value: str) -> str:
+    """Remove OAuth secrets and token-shaped strings from Graph diagnostics."""
+    sanitized = str(value)
+    keyed_patterns = (
+        r"(?i)(client_secret=)[^&\s]+",
+        r"(?i)(access_token['\"]?\s*[:=]\s*['\"]?)[^'\"\s,}]+",
+        r"(?i)(refresh_token['\"]?\s*[:=]\s*['\"]?)[^'\"\s,}]+",
+        r"(?i)(authorization_code['\"]?\s*[:=]\s*['\"]?)[^'\"\s,}]+",
+        r"(?i)(code=)[^&\s]+",
+    )
+    for pattern in keyed_patterns:
+        sanitized = re.sub(pattern, r"\1[redacted]", sanitized)
+    sanitized = re.sub(r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*", "[redacted-token]", sanitized)
+    return sanitized[:1000]
 
 
 def _friendly_graph_error(status_code: int, details: str) -> str:

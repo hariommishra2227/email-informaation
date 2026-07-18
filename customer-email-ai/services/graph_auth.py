@@ -107,6 +107,7 @@ def acquire_token_by_authorization_code(code: str) -> dict[str, Any]:
     _remember_callback_cache_saved(
         _persist_msal_token_cache(token_cache, _account_from_result_or_cache(result, app, stored_account))
     )
+    _verify_persisted_msal_cache()
     if not has_granted_scope(REQUIRED_MAIL_SCOPE, result):
         granted = ", ".join(granted_scopes(result)) or "none"
         raise RuntimeError(f"Microsoft token did not include {REQUIRED_MAIL_SCOPE}. Granted scopes: {granted}.")
@@ -126,6 +127,7 @@ def acquire_token_by_auth_code_flow(flow: dict[str, Any], callback_params: dict[
     _remember_callback_cache_saved(
         _persist_msal_token_cache(token_cache, _account_from_result_or_cache(result, app, stored_account))
     )
+    _verify_persisted_msal_cache()
     if not has_granted_scope(REQUIRED_MAIL_SCOPE, result):
         granted = ", ".join(granted_scopes(result)) or "none"
         raise RuntimeError(f"Microsoft token did not include {REQUIRED_MAIL_SCOPE}. Granted scopes: {granted}.")
@@ -187,6 +189,13 @@ def get_valid_access_token() -> str:
     """Return a non-expired access token, renewing through MSAL when needed."""
     if config.is_mock_mode():
         return "mock-access-token"
+    token_result = st.session_state.get(TOKEN_STATE_KEY, {}) or {}
+    access_token = str(token_result.get("access_token") or "")
+    expires_at = int(token_result.get("expires_at") or 0)
+
+    if access_token and expires_at > int(time.time()) + 60:
+        return access_token
+
     silent_token = acquire_token_silent_once(force_refresh=False)
     if silent_token:
         return silent_token
@@ -241,6 +250,12 @@ def is_connected() -> bool:
     """Return whether the current Streamlit session has a usable Outlook token."""
     if config.is_mock_mode():
         return True
+    token_result = st.session_state.get(TOKEN_STATE_KEY, {}) or {}
+    access_token = str(token_result.get("access_token") or "")
+    expires_at = int(token_result.get("expires_at") or 0)
+    if access_token and expires_at > int(time.time()) + 60:
+        return has_granted_scope(REQUIRED_MAIL_SCOPE, token_result)
+
     token = acquire_token_silent_once(force_refresh=False, clear_on_failure=False)
     return bool(token and has_granted_scope(REQUIRED_MAIL_SCOPE))
 
@@ -325,17 +340,20 @@ def auth_error() -> str:
 
 def auth_diagnostics() -> dict[str, str]:
     """Return safe Outlook auth diagnostics without exposing token material."""
+    token_diagnostics = _session_token_diagnostics()
     if config.is_mock_mode():
-        return {
+        diagnostics = {
             "persisted_cache_exists": "No",
             "accounts_found": "0",
             "silent_token_result": "mock",
             "cache_saved_after_callback": "No",
         }
+        diagnostics.update(token_diagnostics)
+        return diagnostics
     try:
         cache_json, stored_account = database.load_oauth_token_cache(_token_cache_owner())
     except Exception:
-        return {
+        diagnostics = {
             "persisted_cache_exists": "Unknown",
             "accounts_found": "0",
             "silent_token_result": "database_error",
@@ -343,6 +361,8 @@ def auth_diagnostics() -> dict[str, str]:
             "cache_owner": _token_cache_owner(),
             "stored_account": "Unknown",
         }
+        diagnostics.update(token_diagnostics)
+        return diagnostics
     accounts_count = 0
     try:
         token_cache = _new_msal_token_cache()
@@ -354,7 +374,7 @@ def auth_diagnostics() -> dict[str, str]:
         st.session_state[AUTH_ERROR_STATE_KEY] = _format_token_error(
             {"error": exc.__class__.__name__, "error_description": str(exc)}
         )
-    return {
+    diagnostics = {
         "persisted_cache_exists": "Yes" if cache_json else "No",
         "accounts_found": str(accounts_count),
         "silent_token_result": str(_session_state_get(SILENT_RESULT_STATE_KEY) or "not_run"),
@@ -362,6 +382,8 @@ def auth_diagnostics() -> dict[str, str]:
         "cache_owner": _token_cache_owner(),
         "stored_account": "Yes" if stored_account else "No",
     }
+    diagnostics.update(token_diagnostics)
+    return diagnostics
 
 
 def _store_token_result(result: dict[str, Any]) -> None:
@@ -411,6 +433,16 @@ def _persist_msal_token_cache(token_cache: Any | None, account: dict[str, Any] |
     return True
 
 
+def _verify_persisted_msal_cache() -> None:
+    """Verify the callback persisted a reloadable MSAL cache."""
+    cache_json, _account = database.load_oauth_token_cache(_token_cache_owner())
+    if not cache_json:
+        raise RuntimeError("Microsoft token cache was not saved. Please connect Outlook again.")
+    token_cache = _new_msal_token_cache()
+    if token_cache is not None:
+        token_cache.deserialize(cache_json)
+
+
 def _remember_callback_cache_saved(saved: bool) -> None:
     """Remember whether the callback persisted the MSAL cache."""
     st.session_state[CALLBACK_CACHE_SAVED_STATE_KEY] = bool(saved)
@@ -427,6 +459,25 @@ def _session_state_get(key: str, default: Any = None) -> Any:
     if callable(getter):
         return getter(key, default)
     return getattr(st.session_state, key, default)
+
+
+def _session_token_diagnostics() -> dict[str, str]:
+    """Return safe diagnostics for the current session token without exposing it."""
+    token_result = _session_state_get(TOKEN_STATE_KEY, {}) or {}
+    access_token = str(token_result.get("access_token") or "")
+    expires_at = int(token_result.get("expires_at") or 0)
+    now = int(time.time())
+    claims = _decode_jwt_payload(access_token)
+    scopes = str(claims.get("scp") or token_result.get("scope") or "").strip()
+    return {
+        "session_token_exists": "Yes" if access_token else "No",
+        "session_token_expires_at": str(expires_at or ""),
+        "session_token_expired": "Yes" if expires_at and expires_at <= now + 60 else "No",
+        "session_token_aud": str(claims.get("aud") or ""),
+        "session_token_tid": str(claims.get("tid") or ""),
+        "session_token_scopes": ", ".join(scope for scope in scopes.split() if scope),
+        "session_current_timestamp": str(now),
+    }
 
 
 def _clear_persisted_auth() -> None:
