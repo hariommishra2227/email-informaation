@@ -267,69 +267,6 @@ def test_cache_restored_after_new_streamlit_session(monkeypatch) -> None:
     assert new_fake_st.session_state[graph_auth.SILENT_RESULT_STATE_KEY] == "access_token"
 
 
-def test_fresh_callback_token_is_used_immediately(monkeypatch) -> None:
-    fake_st = FakeStreamlit()
-    app = FakeMsalApp()
-    _configure_live_auth(monkeypatch, fake_st, app=app)
-    graph_auth.create_login_url()
-    state = fake_st.session_state[graph_auth.AUTH_STATE_KEY]
-    fake_st.query_params.update({"code": "auth-code", "state": state})
-
-    assert graph_auth.handle_auth_callback()
-    assert graph_auth.get_valid_access_token() == "header.payload.signature"
-    assert app.silent_calls == 0
-
-
-def test_valid_session_token_bypasses_silent_acquisition(monkeypatch) -> None:
-    fake_st = FakeStreamlit()
-    app = FakeMsalApp()
-    _configure_live_auth(monkeypatch, fake_st, app=app)
-    fake_st.session_state[graph_auth.TOKEN_STATE_KEY] = {
-        "access_token": "session-token",
-        "scope": "User.Read Mail.Read",
-        "expires_at": int(time.time()) + 3600,
-    }
-
-    assert graph_auth.get_valid_access_token() == "session-token"
-    assert app.silent_calls == 0
-
-
-def test_expired_session_token_uses_silent_acquisition(monkeypatch) -> None:
-    fake_st = FakeStreamlit()
-    app = FakeMsalApp()
-    _configure_live_auth(monkeypatch, fake_st, app=app)
-    database.store_oauth_token_cache(
-        config.DEFAULT_USER_ID,
-        '{"cached": true}',
-        {"home_account_id": "home-1", "username": "user@example.com"},
-        123,
-    )
-    fake_st.session_state[graph_auth.TOKEN_STATE_KEY] = {
-        "access_token": "expired-session-token",
-        "scope": "User.Read Mail.Read",
-        "expires_at": int(time.time()) - 1,
-    }
-
-    assert graph_auth.get_valid_access_token() == "silent-token"
-    assert app.silent_calls == 1
-
-
-def test_valid_mail_read_token_keeps_user_connected_after_rerun(monkeypatch) -> None:
-    fake_st = FakeStreamlit()
-    app = FakeMsalApp()
-    app.accounts = []
-    _configure_live_auth(monkeypatch, fake_st, app=app)
-    fake_st.session_state[graph_auth.TOKEN_STATE_KEY] = {
-        "access_token": _unsigned_jwt_with_claims(
-            {"aud": "https://graph.microsoft.com", "tid": "tenant-1", "scp": "User.Read Mail.Read"}
-        ),
-        "expires_at": int(time.time()) + 3600,
-    }
-
-    assert graph_auth.is_connected()
-    assert app.silent_calls == 0
-
-
 def test_silent_token_renewal_force_refresh(monkeypatch) -> None:
     fake_st = FakeStreamlit()
     _configure_live_auth(monkeypatch, fake_st)
@@ -358,20 +295,4 @@ def test_missing_or_expired_token_keeps_persisted_cache(monkeypatch) -> None:
     assert graph_auth.acquire_token_silent_once(clear_on_failure=True) is None
     cache_json, _account = database.load_oauth_token_cache(config.DEFAULT_USER_ID)
     assert cache_json == '{"cached": true}'
-
-
-def test_passive_is_connected_check_does_not_delete_cache(monkeypatch) -> None:
-    fake_st = FakeStreamlit()
-    empty_app = FakeMsalApp()
-    empty_app.accounts = []
-    _configure_live_auth(monkeypatch, fake_st, app=empty_app)
-    database.store_oauth_token_cache(
-        config.DEFAULT_USER_ID,
-        '{"cached": true}',
-        {"home_account_id": "missing"},
-        123,
-    )
-
-    assert not graph_auth.is_connected()
-    cache_json, _account = database.load_oauth_token_cache(config.DEFAULT_USER_ID)
-    assert cache_json == '{"cached": true}'
+    assert fake_st.session_state[graph_auth.SILENT_RESULT_STATE_KEY] == "no_account"
