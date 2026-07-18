@@ -131,3 +131,243 @@ def test_connection_panel_does_not_load_inbox_without_token(monkeypatch) -> None
 
     assert not page._render_connection_panel()
     assert calls["list_inbox"] == 0
+
+
+def test_connection_panel_enables_sign_in_when_configured_without_token(monkeypatch) -> None:
+    """No valid token with valid Microsoft config should render an enabled sign-in link."""
+    page = _load_outlook_page()
+    calls = {"link_button": 0, "disabled_sign_in": 0}
+
+    _configure_live_connection_panel(monkeypatch, page, is_connected=False)
+    monkeypatch.setattr(page.graph_auth, "get_authorization_url", lambda: "https://login.example.com")
+
+    class FakeColumn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeStreamlit:
+        session_state = {}
+        query_params = {}
+
+        @staticmethod
+        def subheader(*args, **kwargs):
+            return None
+
+        @staticmethod
+        def columns(spec):
+            return [FakeColumn() for _ in spec]
+
+        @staticmethod
+        def metric(*args, **kwargs):
+            return None
+
+        @staticmethod
+        def button(label, *args, **kwargs):
+            if label == page.config.OUTLOOK_SIGN_IN_LABEL and kwargs.get("disabled"):
+                calls["disabled_sign_in"] += 1
+            return False
+
+        @staticmethod
+        def link_button(label, url, *args, **kwargs):
+            assert label == page.config.OUTLOOK_SIGN_IN_LABEL
+            assert url == "https://login.example.com"
+            calls["link_button"] += 1
+            return None
+
+        @staticmethod
+        def error(*args, **kwargs):
+            return None
+
+        @staticmethod
+        def warning(*args, **kwargs):
+            return None
+
+        @staticmethod
+        def caption(*args, **kwargs):
+            return None
+
+        @staticmethod
+        def write(*args, **kwargs):
+            return None
+
+        @staticmethod
+        def expander(*args, **kwargs):
+            return FakeColumn()
+
+    monkeypatch.setattr(page, "st", FakeStreamlit)
+
+    assert not page._render_connection_panel()
+    assert calls == {"link_button": 1, "disabled_sign_in": 0}
+
+
+def test_connection_panel_enables_disconnect_when_valid_token(monkeypatch) -> None:
+    """A connected session should disable sign-in and enable Disconnect."""
+    page = _load_outlook_page()
+    buttons: list[tuple[str, bool]] = []
+
+    _configure_live_connection_panel(monkeypatch, page, is_connected=True)
+    monkeypatch.setattr(page.graph_auth, "connected_user", lambda: {"mail": "user@example.com"})
+    monkeypatch.setattr(page.graph_client, "get_current_user", lambda: {"mail": "user@example.com"})
+    monkeypatch.setattr(page.graph_auth, "set_connected_user", lambda user: None)
+
+    class FakeColumn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeStreamlit:
+        session_state = {}
+        query_params = {}
+
+        @staticmethod
+        def subheader(*args, **kwargs):
+            return None
+
+        @staticmethod
+        def columns(spec):
+            return [FakeColumn() for _ in spec]
+
+        @staticmethod
+        def metric(*args, **kwargs):
+            return None
+
+        @staticmethod
+        def button(label, *args, **kwargs):
+            buttons.append((label, bool(kwargs.get("disabled"))))
+            return False
+
+        @staticmethod
+        def link_button(*args, **kwargs):
+            raise AssertionError("Sign-in link should not render while connected")
+
+        @staticmethod
+        def error(*args, **kwargs):
+            return None
+
+        @staticmethod
+        def warning(*args, **kwargs):
+            return None
+
+        @staticmethod
+        def caption(*args, **kwargs):
+            return None
+
+        @staticmethod
+        def write(*args, **kwargs):
+            return None
+
+        @staticmethod
+        def expander(*args, **kwargs):
+            return FakeColumn()
+
+    monkeypatch.setattr(page, "st", FakeStreamlit)
+
+    assert page._render_connection_panel()
+    assert (page.config.OUTLOOK_SIGN_IN_LABEL, True) in buttons
+    assert ("Disconnect", False) in buttons
+
+
+def test_connection_panel_treats_expired_token_as_sign_in_available(monkeypatch) -> None:
+    """Expired or unusable auth should leave Sign in available and Disconnect disabled."""
+    page = _load_outlook_page()
+    calls = {"link_button": 0}
+    buttons: list[tuple[str, bool]] = []
+
+    _configure_live_connection_panel(monkeypatch, page, is_connected=False)
+    monkeypatch.setattr(page.graph_auth, "token_exists", lambda: True)
+    monkeypatch.setattr(page.graph_auth, "get_authorization_url", lambda: "https://login.example.com")
+
+    class FakeColumn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeStreamlit:
+        session_state = {}
+        query_params = {}
+
+        @staticmethod
+        def subheader(*args, **kwargs):
+            return None
+
+        @staticmethod
+        def columns(spec):
+            return [FakeColumn() for _ in spec]
+
+        @staticmethod
+        def metric(*args, **kwargs):
+            return None
+
+        @staticmethod
+        def button(label, *args, **kwargs):
+            buttons.append((label, bool(kwargs.get("disabled"))))
+            return False
+
+        @staticmethod
+        def link_button(*args, **kwargs):
+            calls["link_button"] += 1
+            return None
+
+        @staticmethod
+        def error(*args, **kwargs):
+            return None
+
+        @staticmethod
+        def warning(*args, **kwargs):
+            return None
+
+        @staticmethod
+        def caption(*args, **kwargs):
+            return None
+
+        @staticmethod
+        def write(*args, **kwargs):
+            return None
+
+        @staticmethod
+        def expander(*args, **kwargs):
+            return FakeColumn()
+
+    monkeypatch.setattr(page, "st", FakeStreamlit)
+
+    assert not page._render_connection_panel()
+    assert calls["link_button"] == 1
+    assert ("Disconnect", True) in buttons
+
+
+def _configure_live_connection_panel(monkeypatch, page, is_connected: bool) -> None:
+    """Patch a configured live Outlook panel without real Microsoft calls."""
+    monkeypatch.setattr(page.config, "is_mock_mode", lambda: False)
+    monkeypatch.setattr(page.config, "missing_live_settings", lambda: [])
+    monkeypatch.setattr(page.config, "REDIRECT_URI", "https://example.com/Outlook_Connector")
+    monkeypatch.setattr(page.config, "CLIENT_ID", "client-id")
+    monkeypatch.setattr(page.config, "CLIENT_SECRET", "client-secret")
+    monkeypatch.setattr(page.config, "AUTHORITY", "https://login.microsoftonline.com/common")
+    monkeypatch.setattr(page.config, "TENANT_ID", "")
+    monkeypatch.setattr(page.config, "GRAPH_SCOPES", ["User.Read", "Mail.Read"])
+    monkeypatch.setattr(page.config, "is_microsoft_configured", lambda: True)
+    monkeypatch.setattr(page.graph_auth, "handle_auth_callback", lambda: False)
+    monkeypatch.setattr(page.graph_auth, "is_connected", lambda: is_connected)
+    monkeypatch.setattr(page.graph_auth, "auth_error", lambda: "")
+    monkeypatch.setattr(page.graph_auth, "connected_user", lambda: {})
+    monkeypatch.setattr(page.graph_auth, "token_exists", lambda: is_connected)
+    monkeypatch.setattr(page.graph_auth, "granted_scopes", lambda: ["Mail.Read"] if is_connected else [])
+    monkeypatch.setattr(
+        page.graph_auth,
+        "auth_diagnostics",
+        lambda: {
+            "persisted_cache_exists": "Yes" if is_connected else "No",
+            "accounts_found": "1" if is_connected else "0",
+            "silent_token_result": "access_token" if is_connected else "not_run",
+            "cache_saved_after_callback": "No",
+            "cache_owner": "default_user",
+            "stored_account": "Yes" if is_connected else "No",
+        },
+    )
