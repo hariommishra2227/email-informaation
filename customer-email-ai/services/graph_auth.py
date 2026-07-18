@@ -82,6 +82,11 @@ def create_login_url() -> str:
     return auth_uri
 
 
+def get_authorization_url() -> str:
+    """Create a Microsoft authorization URL for the top-level Outlook sign-in link."""
+    return create_login_url()
+
+
 def acquire_token_by_authorization_code(code: str) -> dict[str, Any]:
     """Exchange an authorization code for delegated Microsoft Graph tokens."""
     if config.is_mock_mode():
@@ -491,5 +496,6 @@ def _friendly_error_text(message: str) -> str:
 
 
 get_login_url = create_login_url
+authorization_url = get_authorization_url
 exchange_authorization_code = acquire_token_by_authorization_code
 get_access_token = get_valid_access_token

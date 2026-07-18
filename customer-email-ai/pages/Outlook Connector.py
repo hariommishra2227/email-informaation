@@ -165,15 +165,15 @@ def _render_connection_panel() -> bool:
     login_disabled = _login_is_disabled()
     with status_cols[3]:
         if config.is_mock_mode() or login_disabled:
-            st.button("Sign in with Outlook", disabled=True, use_container_width=True)
+            st.button(config.OUTLOOK_SIGN_IN_LABEL, disabled=True, use_container_width=True)
         elif not graph_auth.is_connected():
             try:
-                authorization_url = graph_auth.create_login_url()
+                authorization_url = graph_auth.get_authorization_url()
                 st.link_button(
-                    "Sign in with Outlook",
+                    config.OUTLOOK_SIGN_IN_LABEL,
                     authorization_url,
                     type="primary",
-                    icon="🔐",
+                    icon=config.OUTLOOK_SIGN_IN_ICON,
                     use_container_width=True,
                 )
             except Exception as exc:
@@ -181,7 +181,7 @@ def _render_connection_panel() -> bool:
                 st.error(_safe_auth_exception_message(exc))
                 _render_login_url_diagnostics(exc)
         else:
-            st.button("Sign in with Outlook", disabled=True, use_container_width=True)
+            st.button(config.OUTLOOK_SIGN_IN_LABEL, disabled=True, use_container_width=True)
     with status_cols[4]:
         disconnect_disabled = not (graph_auth.token_exists() or graph_auth.connected_user() or graph_auth.auth_error())
         if st.button("Disconnect", disabled=disconnect_disabled, use_container_width=True):
@@ -610,7 +610,7 @@ def _sanitize_exception_message(message: str) -> str:
 
 def render_page() -> None:
     """Standalone Streamlit multipage entrypoint."""
-    st.set_page_config(page_title="Outlook Connector", page_icon="📧", layout="wide")
+    st.set_page_config(page_title="Outlook Connector", page_icon=config.APP_PAGE_ICON, layout="wide")
     initialize_outlook_session_state()
     try:
         from page_context import ensure_user_safely, initialize_database_safely, selected_user

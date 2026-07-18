@@ -46,6 +46,7 @@ def initialize_outlook_session_state() -> None:
         "outlook_connected_user": {},
         "outlook_auth_state": "",
         "outlook_auth_error": "",
+        "outlook_sign_in_label": config.OUTLOOK_SIGN_IN_LABEL,
     }
     for key, value in defaults.items():
         if key not in st.session_state:

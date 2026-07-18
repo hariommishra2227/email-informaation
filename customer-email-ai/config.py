@@ -115,6 +115,9 @@ GRAPH_SCOPES = [
     "Mail.Read",
 ]
 OUTLOOK_MODE = OUTLOOK_MODE_LIVE if CONFIGURED_OUTLOOK_MODE == OUTLOOK_MODE_LIVE else OUTLOOK_MODE_MOCK
+APP_PAGE_ICON = "📧"
+OUTLOOK_SIGN_IN_LABEL = "Sign in with Outlook"
+OUTLOOK_SIGN_IN_ICON = "🔐"
 
 
 def get_microsoft_client_id() -> str:

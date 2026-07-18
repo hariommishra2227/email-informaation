@@ -764,7 +764,7 @@ def upgraded_main() -> None:
 
         st.set_page_config(
             page_title="Dashboard",
-            page_icon="📧",
+            page_icon=app_config.APP_PAGE_ICON,
             layout="wide",
         )
         initialize_session_state()
@@ -789,7 +789,7 @@ def upgraded_main() -> None:
             except Exception as exc:
                 st.error(f"User setup failed: {exc}")
 
-        st.page_link("pages/Outlook Connector.py", label="Open Outlook Connector", icon="📧", use_container_width=True)
+        st.page_link("pages/Outlook Connector.py", label="Open Outlook Connector", icon=app_config.APP_PAGE_ICON, use_container_width=True)
 
         if database_ready:
             try:
