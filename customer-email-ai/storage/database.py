@@ -145,6 +145,13 @@ def _initialize_database(db_path: Path | str | None = None) -> None:
                 created_at INTEGER NOT NULL,
                 expires_at INTEGER NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS oauth_token_caches (
+                cache_owner TEXT PRIMARY KEY,
+                cache_json TEXT NOT NULL,
+                account_json TEXT,
+                updated_at INTEGER NOT NULL
+            );
             """
         )
 
@@ -158,6 +165,20 @@ def _ensure_oauth_auth_flows_table(connection: sqlite3.Connection) -> None:
             flow_json TEXT NOT NULL,
             created_at INTEGER NOT NULL,
             expires_at INTEGER NOT NULL
+        )
+        """
+    )
+
+
+def _ensure_oauth_token_caches_table(connection: sqlite3.Connection) -> None:
+    """Create the OAuth token cache table if database initialization has not run yet."""
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS oauth_token_caches (
+            cache_owner TEXT PRIMARY KEY,
+            cache_json TEXT NOT NULL,
+            account_json TEXT,
+            updated_at INTEGER NOT NULL
         )
         """
     )
@@ -256,6 +277,56 @@ def delete_expired_oauth_auth_flows(now: int) -> None:
     with get_connection() as connection:
         _ensure_oauth_auth_flows_table(connection)
         connection.execute("DELETE FROM oauth_auth_flows WHERE expires_at < ?", (int(now),))
+
+
+def store_oauth_token_cache(
+    cache_owner: str,
+    cache_json: str,
+    account: dict[str, Any] | None,
+    updated_at: int,
+) -> None:
+    """Persist one serialized MSAL token cache and safe account metadata."""
+    with get_connection() as connection:
+        _ensure_oauth_token_caches_table(connection)
+        account_json = json.dumps(account or {})
+        connection.execute(
+            """
+            INSERT INTO oauth_token_caches (cache_owner, cache_json, account_json, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(cache_owner) DO UPDATE SET
+                cache_json=excluded.cache_json,
+                account_json=excluded.account_json,
+                updated_at=excluded.updated_at
+            """,
+            (cache_owner, cache_json, account_json, int(updated_at)),
+        )
+
+
+def load_oauth_token_cache(cache_owner: str) -> tuple[str, dict[str, Any] | None]:
+    """Return the serialized MSAL token cache and account metadata for an owner."""
+    with get_connection() as connection:
+        _ensure_oauth_token_caches_table(connection)
+        row = connection.execute(
+            """
+            SELECT cache_json, account_json FROM oauth_token_caches
+            WHERE cache_owner = ?
+            """,
+            (cache_owner,),
+        ).fetchone()
+    if row is None:
+        return "", None
+    try:
+        account = json.loads(str(row["account_json"] or "{}"))
+    except json.JSONDecodeError:
+        account = {}
+    return str(row["cache_json"] or ""), account if isinstance(account, dict) else {}
+
+
+def delete_oauth_token_cache(cache_owner: str) -> None:
+    """Delete one persisted MSAL token cache."""
+    with get_connection() as connection:
+        _ensure_oauth_token_caches_table(connection)
+        connection.execute("DELETE FROM oauth_token_caches WHERE cache_owner = ?", (cache_owner,))
 
 
 def upsert_outlook_message(message: OutlookMessage, status: str = "Pending") -> None:

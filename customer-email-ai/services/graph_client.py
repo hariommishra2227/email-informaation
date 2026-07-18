@@ -118,13 +118,17 @@ def _body_to_text(content: str, content_type: str) -> str:
     return content.strip()
 
 
-def _graph_get(url: str, token: str) -> dict[str, Any]:
+def _graph_get(url: str, token: str, retry_on_unauthorized: bool = True) -> dict[str, Any]:
     """GET Microsoft Graph JSON and raise clear user-facing failures."""
     try:
         response = requests.get(url, headers=_headers(token), timeout=REQUEST_TIMEOUT_SECONDS)
     except requests.RequestException as exc:
         LOGGER.warning("Microsoft Graph network request failed: %s", exc.__class__.__name__)
         raise RuntimeError("Network failure while contacting Microsoft Graph.") from exc
+    if response.status_code == 401 and retry_on_unauthorized:
+        renewed_token = graph_auth.acquire_token_silent_once(force_refresh=True, clear_on_failure=True)
+        if renewed_token:
+            return _graph_get(url, renewed_token, retry_on_unauthorized=False)
     if response.status_code == 401:
         graph_auth.logout_user()
         raise RuntimeError("Your Microsoft session expired. Sign in again.")
