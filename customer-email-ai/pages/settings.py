@@ -60,7 +60,7 @@ def _connection_status() -> str:
 
 def render_page() -> None:
     """Standalone Streamlit multipage entrypoint."""
-    st.set_page_config(page_title="Settings", page_icon="@", layout="wide")
+    st.set_page_config(page_title="Settings", page_icon="⚙️", layout="wide")
     try:
         from page_context import initialize_database_safely
 
