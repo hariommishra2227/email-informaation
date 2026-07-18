@@ -509,6 +509,15 @@ def _render_customer_preview(user_id: str) -> None:
 
 def _friendly_exception_message(exc: Exception) -> str:
     """Return a simple UI message for technical failures."""
+    if isinstance(exc, graph_client.GraphApiError):
+        code = exc.code or "GraphError"
+        message = _sanitize_exception_message(exc.graph_message or str(exc))
+        if exc.status_code == 401 and code.lower() == "invalidauthenticationtoken":
+            return "Your Outlook session expired. Please sign in again."
+        if exc.status_code == 403 and _is_graph_permission_error(str(exc).lower()):
+            return "The Mail.Read permission is missing or has not been approved."
+        return f"Microsoft Graph HTTP {exc.status_code} {code}: {message}"
+
     message = _sanitize_exception_message(str(exc))
     lower = message.lower()
     if _is_graph_permission_error(lower):
@@ -516,12 +525,10 @@ def _friendly_exception_message(exc: Exception) -> str:
     auth_message = _friendly_auth_error_message(lower)
     if auth_message:
         return auth_message
-    if "expired" in lower:
-        return "Your Outlook session expired. Please sign in again."
     if "network" in lower:
         return "Network failure while contacting Microsoft. Please try again."
     if "graph" in lower:
-        return "Microsoft Graph could not complete the request. Please try again."
+        return _safe_exception_detail(exc, message)
     if "database" in lower:
         return "The database could not save Outlook data. Please try again."
     if "mailbox" in lower:

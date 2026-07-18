@@ -49,6 +49,27 @@ def test_invalid_client_has_specific_auth_message() -> None:
     assert page._safe_auth_exception_message(exc) == "The Azure client secret is invalid or expired."
 
 
+def test_only_invalid_authentication_token_maps_to_session_expired() -> None:
+    """Graph errors that merely contain expired text should keep their real message."""
+    page = _load_outlook_page()
+
+    expired_session = page.graph_client.GraphApiError(
+        401,
+        "InvalidAuthenticationToken",
+        "Access token has expired.",
+    )
+    mailbox_error = page.graph_client.GraphApiError(
+        404,
+        "MailboxNotEnabledForRESTAPI",
+        "The mailbox is inactive or expired.",
+    )
+
+    assert page._friendly_exception_message(expired_session) == "Your Outlook session expired. Please sign in again."
+    assert page._friendly_exception_message(mailbox_error) == (
+        "Microsoft Graph HTTP 404 MailboxNotEnabledForRESTAPI: The mailbox is inactive or expired."
+    )
+
+
 def test_connection_panel_does_not_load_inbox_without_token(monkeypatch) -> None:
     """The connection panel should stop inbox loading when Outlook is not connected."""
     page = _load_outlook_page()

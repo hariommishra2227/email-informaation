@@ -208,17 +208,19 @@ def get_valid_access_token() -> str:
     if silent_token:
         return silent_token
 
-    raise RuntimeError("Your Microsoft session expired. Sign in again.")
+    raise RuntimeError("Outlook is not connected. Please sign in with Outlook.")
 
 
 def acquire_token_silent_once(force_refresh: bool = False, clear_on_failure: bool = False) -> str | None:
     """Try to restore or renew an access token from the persisted MSAL cache."""
     if config.is_mock_mode():
         return "mock-access-token"
+    LOGGER.info("Starting MSAL silent token acquisition force_refresh=%s.", force_refresh)
     token_cache, stored_account = _load_msal_token_cache()
     app = _build_msal_app(token_cache)
     account = _select_account(app, stored_account)
     if not account:
+        LOGGER.warning("MSAL silent token acquisition skipped: no account found in token cache.")
         return None
 
     result = _acquire_token_silent(app, account, SILENT_TOKEN_SCOPES, force_refresh=force_refresh)
@@ -227,13 +229,23 @@ def acquire_token_silent_once(force_refresh: bool = False, clear_on_failure: boo
         _store_token_result(result)
         _persist_msal_token_cache(token_cache, _account_from_result_or_cache(result, app, account))
         _remember_silent_token_result("access_token")
+        LOGGER.info(
+            "MSAL silent token acquisition succeeded for scopes=%s.",
+            " ".join(granted_scopes(result)),
+        )
         return str(result["access_token"])
 
     if result and ("error" in result or "error_description" in result):
         st.session_state[AUTH_ERROR_STATE_KEY] = _format_token_error(result)
         _remember_silent_token_result(str(result.get("error") or "token_error"))
+        LOGGER.warning(
+            "MSAL silent token acquisition failed: %s",
+            _format_token_error(result),
+            stack_info=True,
+        )
     else:
         _remember_silent_token_result("no_result")
+        LOGGER.warning("MSAL silent token acquisition returned no result.", stack_info=True)
     return None
 
 
@@ -271,16 +283,19 @@ def is_connected() -> bool:
         and expires_at > int(time.time()) + 60
         and has_granted_scope(REQUIRED_MAIL_SCOPE, token_result)
     ):
+        LOGGER.info("Outlook is connected using current Streamlit session token.")
         return True
 
     silent_token = acquire_token_silent_once(
         force_refresh=False,
         clear_on_failure=False,
     )
-    return bool(
+    connected = bool(
         silent_token
         and has_granted_scope(REQUIRED_MAIL_SCOPE)
     )
+    LOGGER.info("Outlook connected via persisted MSAL cache: %s.", connected)
+    return connected
 
 
 def token_exists() -> bool:
