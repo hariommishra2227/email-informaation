@@ -771,12 +771,22 @@ def upgraded_main() -> None:
         initialize_outlook_session_state()
         render_styles()
 
+        # Microsoft redirects to the root Streamlit URL after sign-in.
+        # Process the OAuth callback before checking connection state or rendering
+        # the dashboard.
         if not app_config.is_mock_mode():
             callback_params = dict(st.query_params)
+
             if "code" in callback_params or "error" in callback_params:
-                callback_success = graph_auth.handle_auth_callback()
+                try:
+                    callback_success = graph_auth.handle_auth_callback()
+                except Exception as exc:
+                    st.error(f"Microsoft authorization callback failed: {exc}")
+                    callback_success = False
+
                 if callback_success:
                     st.switch_page("pages/Outlook Connector.py")
+                    return
 
         st.title("Dashboard")
         st.caption("Track Outlook emails, extracted customers and duplicate records.")

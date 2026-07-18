@@ -21,18 +21,20 @@ class FakeStreamlit:
         self.query_params = query_params or {}
         self.session_state: dict[str, Any] = {}
         self.switched_to = ""
+        self.errors: list[str] = []
+        self.titles: list[str] = []
 
     def set_page_config(self, *args, **kwargs) -> None:
         return None
 
-    def title(self, *args, **kwargs) -> None:
-        return None
+    def title(self, text: str, *args, **kwargs) -> None:
+        self.titles.append(text)
 
     def caption(self, *args, **kwargs) -> None:
         return None
 
-    def error(self, *args, **kwargs) -> None:
-        return None
+    def error(self, message: str, *args, **kwargs) -> None:
+        self.errors.append(str(message))
 
     def success(self, *args, **kwargs) -> None:
         return None
@@ -116,3 +118,42 @@ def test_successful_root_callback_switches_to_outlook_connector(monkeypatch) -> 
         pass
 
     assert fake_st.switched_to == "pages/Outlook Connector.py"
+
+
+def test_normal_dashboard_without_callback_does_not_handle_callback(monkeypatch) -> None:
+    fake_st = FakeStreamlit()
+    calls: list[str] = []
+    _configure_root_app(monkeypatch, fake_st)
+
+    monkeypatch.setattr(
+        graph_auth,
+        "handle_auth_callback",
+        lambda: (_ for _ in ()).throw(AssertionError("callback should not run without code or error")),
+    )
+    monkeypatch.setattr(graph_auth, "auth_error", lambda: "")
+    monkeypatch.setattr(graph_auth, "is_connected", lambda: calls.append("is_connected") or False)
+
+    app.upgraded_main()
+
+    assert fake_st.titles == ["Dashboard"]
+    assert calls == ["is_connected"]
+
+
+def test_root_callback_failure_does_not_crash_app(monkeypatch) -> None:
+    fake_st = FakeStreamlit({"code": "auth-code", "state": "state-1"})
+    calls: list[str] = []
+    _configure_root_app(monkeypatch, fake_st)
+
+    def fail_callback() -> bool:
+        calls.append("handle")
+        raise RuntimeError("callback failed")
+
+    monkeypatch.setattr(graph_auth, "handle_auth_callback", fail_callback)
+    monkeypatch.setattr(graph_auth, "auth_error", lambda: "")
+    monkeypatch.setattr(graph_auth, "is_connected", lambda: calls.append("is_connected") or False)
+
+    app.upgraded_main()
+
+    assert calls == ["handle", "is_connected"]
+    assert fake_st.titles == ["Dashboard"]
+    assert fake_st.errors == ["Microsoft authorization callback failed: callback failed"]
