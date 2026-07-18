@@ -242,6 +242,14 @@ def store_oauth_auth_flow(flow_id: str, flow: dict[str, Any], created_at: int, e
 
 def consume_oauth_auth_flow(flow_id: str, now: int) -> tuple[str, dict[str, Any] | None]:
     """Return and delete a pending MSAL flow, reporting missing or expired state."""
+    status, flow = load_oauth_auth_flow(flow_id, now)
+    if status == "ok":
+        delete_oauth_auth_flow(flow_id)
+    return status, flow
+
+
+def load_oauth_auth_flow(flow_id: str, now: int) -> tuple[str, dict[str, Any] | None]:
+    """Return a pending MSAL flow without deleting it."""
     with get_connection() as connection:
         _ensure_oauth_auth_flows_table(connection)
         row = connection.execute(
@@ -254,7 +262,6 @@ def consume_oauth_auth_flow(flow_id: str, now: int) -> tuple[str, dict[str, Any]
         if row is None:
             return "missing", None
 
-        connection.execute("DELETE FROM oauth_auth_flows WHERE flow_id = ?", (flow_id,))
         if int(row["expires_at"]) < int(now):
             return "expired", None
 
