@@ -27,6 +27,7 @@ USER_STATE_KEY = "outlook_connected_user"
 AUTH_STATE_KEY = "outlook_auth_state"
 AUTH_ERROR_STATE_KEY = "outlook_auth_error"
 REQUIRED_MAIL_SCOPE = "Mail.Read"
+SILENT_TOKEN_SCOPES = ["User.Read", "Mail.Read"]
 AUTH_FLOW_TTL_SECONDS = 600
 
 
@@ -180,12 +181,6 @@ def get_valid_access_token() -> str:
     """Return a non-expired access token, renewing through MSAL when needed."""
     if config.is_mock_mode():
         return "mock-access-token"
-    token_result = st.session_state.get(TOKEN_STATE_KEY) or {}
-    access_token = token_result.get("access_token")
-    expires_at = int(token_result.get("expires_at") or 0)
-    if access_token and expires_at > int(time.time()) + 60:
-        return str(access_token)
-
     silent_token = acquire_token_silent_once(force_refresh=False, clear_on_failure=True)
     if silent_token:
         return silent_token
@@ -206,7 +201,8 @@ def acquire_token_silent_once(force_refresh: bool = False, clear_on_failure: boo
             _clear_persisted_auth()
         return None
 
-    result = _acquire_token_silent(app, account, force_refresh=force_refresh)
+    result = _acquire_token_silent(app, account, SILENT_TOKEN_SCOPES, force_refresh=force_refresh)
+    _persist_msal_token_cache(token_cache, account)
     if result and "access_token" in result:
         _store_token_result(result)
         _persist_msal_token_cache(token_cache, _account_from_result_or_cache(result, app, account))
@@ -235,11 +231,10 @@ def logout_user() -> None:
 
 def is_connected() -> bool:
     """Return whether the current Streamlit session has a usable Outlook token."""
-    try:
-        get_valid_access_token()
-        return has_granted_scope(REQUIRED_MAIL_SCOPE)
-    except Exception:
-        return False
+    if config.is_mock_mode():
+        return True
+    token = acquire_token_silent_once(force_refresh=False, clear_on_failure=False)
+    return bool(token and has_granted_scope(REQUIRED_MAIL_SCOPE))
 
 
 def token_exists() -> bool:
@@ -424,12 +419,18 @@ def _safe_account_metadata(account: dict[str, Any]) -> dict[str, Any]:
     return {key: str(account.get(key, "")) for key in safe_keys if account.get(key)}
 
 
-def _acquire_token_silent(app: Any, account: dict[str, Any], force_refresh: bool = False) -> dict[str, Any] | None:
+def _acquire_token_silent(
+    app: Any,
+    account: dict[str, Any],
+    scopes: list[str] | None = None,
+    force_refresh: bool = False,
+) -> dict[str, Any] | None:
     """Call MSAL acquire_token_silent while tolerating older/test signatures."""
+    requested_scopes = scopes or SILENT_TOKEN_SCOPES
     try:
-        return app.acquire_token_silent(config.GRAPH_SCOPES, account=account, force_refresh=force_refresh)
+        return app.acquire_token_silent(requested_scopes, account=account, force_refresh=force_refresh)
     except TypeError:
-        return app.acquire_token_silent(config.GRAPH_SCOPES, account=account)
+        return app.acquire_token_silent(requested_scopes, account=account)
 
 
 def _rerun_after_callback() -> None:
