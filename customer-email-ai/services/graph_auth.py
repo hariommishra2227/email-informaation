@@ -184,7 +184,7 @@ def handle_auth_callback() -> bool:
 
 
 def get_valid_access_token() -> str:
-    """Return a non-expired access token, renewing through MSAL when needed."""
+    """Return a usable access token, preferring the fresh Streamlit session token."""
     if config.is_mock_mode():
         return "mock-access-token"
     silent_token = acquire_token_silent_once(force_refresh=False)
@@ -198,6 +198,7 @@ def acquire_token_silent_once(force_refresh: bool = False, clear_on_failure: boo
     """Try to restore or renew an access token from the persisted MSAL cache."""
     if config.is_mock_mode():
         return "mock-access-token"
+    LOGGER.info("Starting MSAL silent token acquisition force_refresh=%s.", force_refresh)
     token_cache, stored_account = _load_msal_token_cache()
     app = _build_msal_app(token_cache)
     account = _select_account(app, stored_account)
@@ -238,11 +239,36 @@ def logout_user(clear_persisted: bool = True) -> None:
 
 
 def is_connected() -> bool:
-    """Return whether the current Streamlit session has a usable Outlook token."""
+    """Return whether the current session or persisted cache has a usable token."""
     if config.is_mock_mode():
         return True
-    token = acquire_token_silent_once(force_refresh=False, clear_on_failure=False)
-    return bool(token and has_granted_scope(REQUIRED_MAIL_SCOPE))
+
+    token_result = st.session_state.get(TOKEN_STATE_KEY, {}) or {}
+    access_token = str(token_result.get("access_token") or "")
+
+    try:
+        expires_at = int(token_result.get("expires_at") or 0)
+    except (TypeError, ValueError):
+        expires_at = 0
+
+    if (
+        access_token
+        and expires_at > int(time.time()) + 60
+        and has_granted_scope(REQUIRED_MAIL_SCOPE, token_result)
+    ):
+        LOGGER.info("Outlook is connected using current Streamlit session token.")
+        return True
+
+    silent_token = acquire_token_silent_once(
+        force_refresh=False,
+        clear_on_failure=False,
+    )
+    connected = bool(
+        silent_token
+        and has_granted_scope(REQUIRED_MAIL_SCOPE)
+    )
+    LOGGER.info("Outlook connected via persisted MSAL cache: %s.", connected)
+    return connected
 
 
 def token_exists() -> bool:

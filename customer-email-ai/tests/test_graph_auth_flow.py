@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import base64
+import json
+import time
 from typing import Any
 
 import config
@@ -63,6 +66,8 @@ class FakeMsalApp:
 
     def __init__(self, token_cache: FakeSerializableTokenCache | None = None, result: dict[str, Any] | None = None) -> None:
         self.token_cache = token_cache
+        self.silent_calls = 0
+        self.silent_result: dict[str, Any] | None = None
         self.accounts = [
             {
                 "home_account_id": "home-1",
@@ -110,6 +115,9 @@ class FakeMsalApp:
         account: dict[str, Any],
         force_refresh: bool = False,
     ) -> dict[str, Any]:
+        self.silent_calls += 1
+        if self.silent_result is not None:
+            return dict(self.silent_result)
         token = "renewed-token" if force_refresh else "silent-token"
         return {
             "access_token": token,
@@ -138,8 +146,26 @@ def _configure_live_auth(monkeypatch, fake_st: FakeStreamlit, app: FakeMsalApp |
     )
     monkeypatch.setattr(graph_auth, "st", fake_st)
     monkeypatch.setattr(graph_auth, "msal", FakeMsalModule)
-    monkeypatch.setattr(graph_auth, "_build_msal_app", lambda token_cache=None: app or FakeMsalApp(token_cache))
+
+    def build_app(token_cache=None):
+        if app is not None:
+            app.token_cache = token_cache
+            return app
+        return FakeMsalApp(token_cache)
+
+    monkeypatch.setattr(graph_auth, "_build_msal_app", build_app)
     database.initialize_database(db_path)
+
+
+def _unsigned_jwt_with_claims(claims: dict[str, Any]) -> str:
+    """Return an unsigned JWT-shaped string for safe claim decoding tests."""
+    header = {"alg": "none", "typ": "JWT"}
+
+    def encode(data: dict[str, Any]) -> str:
+        raw = json.dumps(data, separators=(",", ":")).encode("utf-8")
+        return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+    return f"{encode(header)}.{encode(claims)}."
 
 
 def test_auth_code_flow_successful_state_match(monkeypatch) -> None:
