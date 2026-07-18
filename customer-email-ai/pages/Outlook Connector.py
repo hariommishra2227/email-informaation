@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 import logging
+import re
 from urllib.parse import urlparse
 
 import pandas as pd
@@ -100,7 +101,11 @@ def _render_connection_panel() -> bool:
     """Render Outlook connection state and return whether inbox loading can continue."""
     st.subheader("Outlook Connection")
     if not config.is_mock_mode():
-        graph_auth.handle_auth_callback()
+        try:
+            graph_auth.handle_auth_callback()
+        except Exception as exc:
+            LOGGER.exception("Microsoft authorization callback failed.")
+            st.error(_safe_auth_exception_message(exc))
 
     status_label = "Demo Mode" if config.is_mock_mode() else ("Connected" if graph_auth.is_connected() else "Outlook not connected")
     mode_label = "Demo Mode" if config.is_mock_mode() else "Real Mode"
@@ -135,7 +140,8 @@ def _render_connection_panel() -> bool:
                 st.link_button("Connect Outlook", graph_auth.create_login_url(), type="primary", use_container_width=True)
             except Exception as exc:
                 LOGGER.exception("Could not create Microsoft login URL.")
-                st.error(_friendly_exception_message(exc))
+                st.error(_safe_auth_exception_message(exc))
+                _render_login_url_diagnostics(exc)
         else:
             st.button("Connect Outlook", disabled=True, use_container_width=True)
     with status_cols[4]:
@@ -195,6 +201,7 @@ def _render_safe_diagnostics() -> None:
         "Redirect URI": config.REDIRECT_URI or "Not configured",
         "Authority host": authority_host,
         "Tenant ID": tenant_id,
+        "Requested scopes": ", ".join(config.GRAPH_SCOPES),
         "Token exists": "Yes" if graph_auth.token_exists() else "No",
         "Granted scopes": ", ".join(graph_auth.granted_scopes()) or "None",
     }
@@ -207,6 +214,22 @@ def _tenant_from_authority_path(path: str) -> str:
     """Extract the tenant path segment from a Microsoft authority URL."""
     parts = [part for part in path.split("/") if part]
     return parts[0] if parts else ""
+
+
+def _render_login_url_diagnostics(exc: Exception) -> None:
+    """Show safe diagnostics for Microsoft login URL creation failures."""
+    rows = {
+        "Client ID loaded": "Yes" if config.CLIENT_ID else "No",
+        "Client secret loaded": "Yes" if config.CLIENT_SECRET else "No",
+        "Authority": config.AUTHORITY or "Not configured",
+        "Redirect URI": config.REDIRECT_URI or "Not configured",
+        "Requested scopes": ", ".join(config.GRAPH_SCOPES),
+        "Exception class": exc.__class__.__name__,
+        "Exception message": _sanitize_exception_message(str(exc)),
+    }
+    with st.expander("Microsoft login diagnostics", expanded=True):
+        for label, value in rows.items():
+            st.write(f"**{label}:** {value}")
 
 
 def _render_quick_actions(user_id: str) -> tuple[bool, bool, bool]:
@@ -422,20 +445,15 @@ def _render_customer_preview(user_id: str) -> None:
 
 def _friendly_exception_message(exc: Exception) -> str:
     """Return a simple UI message for technical failures."""
-    message = str(exc)
+    message = _sanitize_exception_message(str(exc))
     lower = message.lower()
+    if _is_graph_permission_error(lower):
+        return "The Mail.Read permission is missing or has not been approved."
+    auth_message = _friendly_auth_error_message(lower)
+    if auth_message:
+        return auth_message
     if "expired" in lower:
         return "Your Outlook session expired. Please sign in again."
-    if "secret" in lower or "invalid_client" in lower:
-        return "The Microsoft client secret is invalid or expired. Ask the administrator to update Streamlit Secrets with a new Secret Value."
-    if "redirect" in lower or "aadsts50011" in lower:
-        return "The Microsoft redirect URI does not match the Entra app registration."
-    if "tenant" in lower:
-        return "The Microsoft tenant ID is invalid or does not match this app registration."
-    if "permission" in lower or "consent" in lower:
-        return "Outlook permissions are not approved yet. Your Microsoft administrator may need to grant access."
-    if "mail.read" in lower:
-        return "The Mail.Read permission is missing or has not been approved."
     if "network" in lower:
         return "Network failure while contacting Microsoft. Please try again."
     if "graph" in lower:
@@ -443,10 +461,89 @@ def _friendly_exception_message(exc: Exception) -> str:
     if "database" in lower:
         return "The database could not save Outlook data. Please try again."
     if "mailbox" in lower:
-        return "This Microsoft account does not have an available mailbox."
+        return "The signed-in account does not have an Outlook/Exchange mailbox."
     if "configuration" in lower or "missing" in lower:
         return "Outlook is not configured yet. Please check Settings."
-    return "Outlook could not complete the request. Please try again."
+    return _safe_exception_detail(exc, message)
+
+
+def _safe_auth_exception_message(exc: Exception) -> str:
+    """Return an auth-specific safe error without mapping it to Mail.Read."""
+    message = _sanitize_exception_message(str(exc))
+    lower = message.lower()
+    auth_message = _friendly_auth_error_message(lower)
+    if auth_message:
+        return auth_message
+    if "msal" in lower or "authorization" in lower or "oauth" in lower or "login" in lower:
+        return _safe_exception_detail(exc, message)
+    return _safe_exception_detail(exc, message)
+
+
+def _friendly_auth_error_message(lower: str) -> str:
+    """Map common Microsoft auth failures without hiding them as Mail.Read issues."""
+    if "invalid_client" in lower or "aadsts7000215" in lower or "aadsts7000222" in lower:
+        return "The Azure client secret is invalid or expired."
+    if "aadsts50011" in lower or "redirect_uri" in lower or "reply address" in lower or "redirect uri" in lower:
+        return "The Azure redirect URI does not match the Streamlit redirect URI."
+    if "aadsts700016" in lower or "invalidtenant" in lower or "invalid tenant" in lower or "authority" in lower:
+        return "The Azure tenant or authority configuration is invalid."
+    if "aadsts65001" in lower or "consent required" in lower or "authorization_pending" in lower:
+        return "Microsoft consent is required for the requested permissions."
+    if "mailbox unavailable" in lower or "mailbox" in lower:
+        return "The signed-in account does not have an Outlook/Exchange mailbox."
+    return ""
+
+
+def _is_graph_permission_error(lower: str) -> bool:
+    """Return whether a message is a genuine Graph permission failure."""
+    has_graph_status = (
+        "microsoft graph" in lower
+        and (
+            "status code 401" in lower
+            or "status code 403" in lower
+            or "http 401" in lower
+            or "http 403" in lower
+            or "(401)" in lower
+            or "(403)" in lower
+            or "permission denied" in lower
+        )
+    )
+    permission_markers = (
+        "authorization_requestdenied",
+        "erroraccessdenied",
+        "insufficient privileges",
+        "access denied",
+        "consent required",
+        "missing mail.read",
+        "mail.read permission",
+        "mail.read scope",
+    )
+    return has_graph_status and any(marker in lower for marker in permission_markers)
+
+
+def _safe_exception_detail(exc: Exception, message: str | None = None) -> str:
+    """Return a sanitized exception class and message for user-facing diagnostics."""
+    safe_message = _sanitize_exception_message(str(exc) if message is None else message)
+    if not safe_message:
+        safe_message = "No additional error details were provided."
+    return f"{exc.__class__.__name__}: {safe_message}"
+
+
+def _sanitize_exception_message(message: str) -> str:
+    """Remove OAuth secrets and token-like values from a diagnostic message."""
+    sanitized = str(message)
+    keyed_patterns = (
+        r"(?i)(client_secret=)[^&\s]+",
+        r"(?i)(client_secret['\"]?\s*[:=]\s*['\"]?)[^'\"\s,}]+",
+        r"(?i)(access_token['\"]?\s*[:=]\s*['\"]?)[^'\"\s,}]+",
+        r"(?i)(refresh_token['\"]?\s*[:=]\s*['\"]?)[^'\"\s,}]+",
+        r"(?i)(authorization_code['\"]?\s*[:=]\s*['\"]?)[^'\"\s,}]+",
+        r"(?i)(code=)[^&\s]+",
+    )
+    for pattern in keyed_patterns:
+        sanitized = re.sub(pattern, r"\1[redacted]", sanitized)
+    sanitized = re.sub(r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*", "[redacted-token]", sanitized)
+    return sanitized[:1000]
 
 
 def render_page() -> None:
