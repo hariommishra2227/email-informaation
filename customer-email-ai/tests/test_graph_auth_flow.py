@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import config
@@ -160,7 +161,9 @@ def test_auth_code_flow_successful_state_match(monkeypatch) -> None:
 
 def test_auth_code_flow_mismatched_state(monkeypatch) -> None:
     fake_st = FakeStreamlit()
-    _configure_live_auth(monkeypatch, fake_st)
+    empty_app = FakeMsalApp()
+    empty_app.accounts = []
+    _configure_live_auth(monkeypatch, fake_st, app=empty_app)
 
     graph_auth.create_login_url()
     fake_st.query_params.update({"code": "auth-code", "state": "wrong-state"})
@@ -192,17 +195,66 @@ def test_auth_code_flow_callback_processed_twice(monkeypatch) -> None:
     assert graph_auth.handle_auth_callback()
     fake_st.query_params.update({"code": "auth-code", "state": state})
 
-    assert not graph_auth.handle_auth_callback()
-    assert "already used" in graph_auth.auth_error().lower()
+    assert graph_auth.handle_auth_callback()
+    assert "already used" not in graph_auth.auth_error().lower()
 
 
 def test_auth_code_flow_missing_stored_flow(monkeypatch) -> None:
     fake_st = FakeStreamlit()
-    _configure_live_auth(monkeypatch, fake_st)
+    empty_app = FakeMsalApp()
+    empty_app.accounts = []
+    _configure_live_auth(monkeypatch, fake_st, app=empty_app)
     fake_st.query_params.update({"code": "auth-code", "state": "missing-state"})
 
     assert not graph_auth.handle_auth_callback()
     assert "not found" in graph_auth.auth_error().lower()
+
+
+def test_missing_flow_with_valid_session_token_returns_success(monkeypatch) -> None:
+    fake_st = FakeStreamlit()
+    _configure_live_auth(monkeypatch, fake_st)
+    fake_st.session_state[graph_auth.TOKEN_STATE_KEY] = {
+        "access_token": "session-token",
+        "scope": "User.Read Mail.Read",
+        "expires_at": int(time.time()) + 3600,
+    }
+    fake_st.session_state[graph_auth.AUTH_FLOW_STATE_KEY] = {"state": "old-state"}
+    fake_st.query_params.update({"code": "auth-code", "state": "missing-state"})
+
+    assert graph_auth.handle_auth_callback()
+    assert graph_auth.auth_error() == ""
+    assert fake_st.session_state[graph_auth.AUTH_STATE_KEY] == ""
+    assert graph_auth.AUTH_FLOW_STATE_KEY not in fake_st.session_state
+    assert fake_st.query_params == {}
+
+
+def test_missing_flow_with_valid_persisted_cache_returns_success(monkeypatch) -> None:
+    fake_st = FakeStreamlit()
+    _configure_live_auth(monkeypatch, fake_st)
+    database.store_oauth_token_cache(
+        config.DEFAULT_USER_ID,
+        '{"cached": true}',
+        {"home_account_id": "home-1", "username": "user@example.com"},
+        123,
+    )
+    fake_st.query_params.update({"code": "auth-code", "state": "missing-state"})
+
+    assert graph_auth.handle_auth_callback()
+    assert graph_auth.auth_error() == ""
+    assert fake_st.query_params == {}
+    assert graph_auth.token_exists()
+
+
+def test_missing_flow_without_token_still_requires_reconnect(monkeypatch) -> None:
+    fake_st = FakeStreamlit()
+    empty_app = FakeMsalApp()
+    empty_app.accounts = []
+    _configure_live_auth(monkeypatch, fake_st, app=empty_app)
+    fake_st.query_params.update({"code": "auth-code", "state": "missing-state"})
+
+    assert not graph_auth.handle_auth_callback()
+    assert "not found" in graph_auth.auth_error().lower()
+    assert fake_st.query_params == {"code": "auth-code", "state": "missing-state"}
 
 
 def test_cache_restored_after_new_streamlit_session(monkeypatch) -> None:

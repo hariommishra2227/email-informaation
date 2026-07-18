@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import logging
 import secrets
@@ -25,6 +26,9 @@ TOKEN_STATE_KEY = "outlook_token_result"
 ACCOUNT_STATE_KEY = "outlook_account"
 USER_STATE_KEY = "outlook_connected_user"
 AUTH_STATE_KEY = "outlook_auth_state"
+AUTH_FLOW_STATE_KEY = "outlook_auth_flow"
+AUTH_CODE_ATTEMPT_STATE_KEY = "outlook_auth_code_attempt"
+AUTH_CODE_SUCCESS_STATE_KEY = "outlook_auth_code_success"
 AUTH_ERROR_STATE_KEY = "outlook_auth_error"
 REQUIRED_MAIL_SCOPE = "Mail.Read"
 AUTH_FLOW_TTL_SECONDS = 600
@@ -79,6 +83,9 @@ def create_login_url() -> str:
         expires_at=now + AUTH_FLOW_TTL_SECONDS,
     )
     st.session_state[AUTH_STATE_KEY] = flow_id
+    st.session_state[AUTH_FLOW_STATE_KEY] = flow
+    st.session_state[AUTH_CODE_ATTEMPT_STATE_KEY] = ""
+    st.session_state[AUTH_CODE_SUCCESS_STATE_KEY] = ""
     return auth_uri
 
 
@@ -126,13 +133,15 @@ def handle_auth_callback() -> bool:
         return True
 
     params = dict(st.query_params)
+    LOGGER.debug(
+        "handle_auth_callback: auth_flow exists=%s state=%s request_code=%s",
+        bool(st.session_state.get(AUTH_FLOW_STATE_KEY)),
+        str(params.get("state") or st.session_state.get(AUTH_STATE_KEY) or ""),
+        _safe_code_debug(params.get("code")),
+    )
     if "error" in params:
         flow_id = str(params.get("state") or "")
-        if flow_id:
-            database.delete_oauth_auth_flow(flow_id)
         st.session_state[AUTH_ERROR_STATE_KEY] = _format_query_error(params)
-        st.session_state[AUTH_STATE_KEY] = ""
-        _clear_callback_query_params()
         return False
     code = params.get("code")
     if not code:
@@ -141,33 +150,57 @@ def handle_auth_callback() -> bool:
     flow_id = str(params.get("state") or "")
     if not flow_id:
         st.session_state[AUTH_ERROR_STATE_KEY] = "Microsoft sign-in did not include a state value. Please connect Outlook again."
-        st.session_state[AUTH_STATE_KEY] = ""
-        _clear_callback_query_params()
         return False
 
-    status, flow = database.consume_oauth_auth_flow(flow_id, now=int(time.time()))
-    if status == "missing":
-        st.session_state[AUTH_ERROR_STATE_KEY] = "Microsoft sign-in flow was not found or was already used. Please connect Outlook again."
-        st.session_state[AUTH_STATE_KEY] = ""
+    code_attempt = f"{flow_id}:{_safe_fingerprint(str(code))}"
+    if st.session_state.get(AUTH_CODE_SUCCESS_STATE_KEY) == code_attempt and is_connected():
         _clear_callback_query_params()
+        return True
+
+    flow = _session_auth_flow(flow_id)
+    status = "ok" if flow else "missing"
+    if not flow:
+        status, flow = database.load_oauth_auth_flow(flow_id, now=int(time.time()))
+        if status == "ok" and flow:
+            st.session_state[AUTH_FLOW_STATE_KEY] = flow
+            st.session_state[AUTH_STATE_KEY] = flow_id
+    if status == "missing":
+        if is_connected() or token_exists():
+            st.session_state[AUTH_ERROR_STATE_KEY] = ""
+            st.session_state[AUTH_STATE_KEY] = ""
+            st.session_state.pop(AUTH_FLOW_STATE_KEY, None)
+            st.session_state[AUTH_CODE_ATTEMPT_STATE_KEY] = ""
+            _clear_callback_query_params()
+            return True
+
+        st.session_state[AUTH_ERROR_STATE_KEY] = "Microsoft sign-in flow was not found or was already used. Please connect Outlook again."
         return False
     if status == "expired":
         st.session_state[AUTH_ERROR_STATE_KEY] = "Microsoft sign-in flow expired. Please connect Outlook again."
-        st.session_state[AUTH_STATE_KEY] = ""
-        _clear_callback_query_params()
         return False
 
+    if st.session_state.get(AUTH_CODE_ATTEMPT_STATE_KEY) == code_attempt:
+        return is_connected()
+
     try:
+        st.session_state[AUTH_CODE_ATTEMPT_STATE_KEY] = code_attempt
         acquire_token_by_auth_code_flow(flow or {}, params)
+        database.delete_oauth_auth_flow(flow_id)
         st.session_state[AUTH_STATE_KEY] = ""
+        st.session_state.pop(AUTH_FLOW_STATE_KEY, None)
+        st.session_state[AUTH_CODE_ATTEMPT_STATE_KEY] = ""
+        st.session_state[AUTH_CODE_SUCCESS_STATE_KEY] = code_attempt
         _clear_callback_query_params()
         st.session_state[AUTH_ERROR_STATE_KEY] = ""
         _rerun_after_callback()
         return True
     except Exception as exc:
         st.session_state[AUTH_ERROR_STATE_KEY] = str(exc)
-        st.session_state[AUTH_STATE_KEY] = ""
-        _clear_callback_query_params()
+        LOGGER.exception(
+            "handle_auth_callback: token exchange failed state=%s request_code=%s",
+            flow_id,
+            _safe_code_debug(code),
+        )
         return False
 
 
@@ -432,6 +465,29 @@ def _rerun_after_callback() -> None:
     rerun = getattr(st, "rerun", None)
     if callable(rerun):
         rerun()
+
+
+def _session_auth_flow(flow_id: str) -> dict[str, Any] | None:
+    """Return the saved Streamlit auth flow for this callback state."""
+    flow = st.session_state.get(AUTH_FLOW_STATE_KEY)
+    if not isinstance(flow, dict):
+        return None
+    return flow if str(flow.get("state") or "") == flow_id else None
+
+
+def _safe_fingerprint(value: str) -> str:
+    """Return a short non-secret fingerprint for correlating callback logs."""
+    if not value:
+        return ""
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+
+
+def _safe_code_debug(value: Any) -> str:
+    """Describe an authorization code without logging the secret code itself."""
+    code = str(value or "")
+    if not code:
+        return "present=False"
+    return f"present=True length={len(code)} sha256={_safe_fingerprint(code)}"
 
 
 def _format_token_error(result: dict[str, Any]) -> str:
