@@ -23,10 +23,11 @@ REQUEST_TIMEOUT_SECONDS = 20
 class GraphApiError(RuntimeError):
     """Microsoft Graph failure with safe diagnostic fields."""
 
-    def __init__(self, status_code: int, code: str, message: str) -> None:
+    def __init__(self, status_code: int, code: str, message: str, authenticate_header: str = "") -> None:
         self.status_code = int(status_code)
         self.code = _sanitize_graph_error(code or "")
         self.graph_message = _sanitize_graph_error(message or "")
+        self.authenticate_header = _sanitize_graph_error(authenticate_header or "")
         detail = self.graph_message or self.code or "Microsoft Graph request failed."
         super().__init__(f"Microsoft Graph HTTP {self.status_code} {self.code}: {detail}")
 
@@ -142,18 +143,25 @@ def _graph_get(url: str, token: str, retry_on_unauthorized: bool = True) -> dict
     LOGGER.info("Microsoft Graph response status=%s url=%s", response.status_code, _safe_graph_url(url))
     LOGGER.info("Microsoft Graph response body=%s", _safe_response_text(response))
     graph_error = _graph_error_details(response)
+    authenticate_header = _safe_authenticate_header(response)
     if response.status_code == 401 and retry_on_unauthorized:
         LOGGER.warning(
-            "Microsoft Graph returned 401 code=%s message=%s; attempting silent token renewal once.",
+            "Microsoft Graph returned 401 code=%s message=%s authenticate_header=%s; attempting silent token renewal once.",
             graph_error["code"],
             graph_error["message"],
+            authenticate_header,
         )
         renewed_token = graph_auth.acquire_token_silent_once(force_refresh=True)
         if renewed_token:
             return _graph_get(url, renewed_token, retry_on_unauthorized=False)
         LOGGER.warning("Microsoft Graph 401 silent renewal did not return an access token.")
     if response.status_code == 401:
-        raise GraphApiError(response.status_code, graph_error["code"], graph_error["message"])
+        raise GraphApiError(
+            response.status_code,
+            graph_error["code"],
+            graph_error["message"],
+            authenticate_header=authenticate_header,
+        )
     if response.status_code == 403:
         raise GraphApiError(response.status_code, graph_error["code"] or "Forbidden", graph_error["message"])
     if response.status_code == 404:
@@ -210,6 +218,15 @@ def _safe_response_text(response: requests.Response) -> str:
         return _sanitize_graph_error(str(response.json()))
     except ValueError:
         return ""
+
+
+def _safe_authenticate_header(response: requests.Response) -> str:
+    """Return a sanitized WWW-Authenticate response header."""
+    headers = getattr(response, "headers", {}) or {}
+    get_header = getattr(headers, "get", None)
+    if not callable(get_header):
+        return ""
+    return _sanitize_graph_error(str(get_header("WWW-Authenticate", "") or ""))
 
 
 def _sanitize_graph_error(value: str) -> str:

@@ -73,6 +73,30 @@ def test_only_invalid_authentication_token_maps_to_session_expired() -> None:
     )
 
 
+def test_graph_401_shows_safe_authenticate_header(monkeypatch) -> None:
+    """Graph 401 messages should include sanitized WWW-Authenticate diagnostics."""
+    page = _load_outlook_page()
+    monkeypatch.setattr(page.graph_auth, "access_token_audience", lambda: "https://graph.microsoft.com")
+    exc = page.graph_client.GraphApiError(
+        401,
+        "InvalidAuthenticationToken",
+        "Token validation failed.",
+        authenticate_header=(
+            'Bearer error="invalid_token", '
+            'error_description="Token eyJabc.def.ghi was rejected", '
+            'refresh_token="secret-refresh-token"'
+        ),
+    )
+
+    message = page._friendly_exception_message(exc)
+
+    assert "Microsoft Graph HTTP 401 InvalidAuthenticationToken: Token validation failed." in message
+    assert "Token audience: https://graph.microsoft.com" in message
+    assert "WWW-Authenticate:" in message
+    assert "[redacted-token]" in message
+    assert "secret-refresh-token" not in message
+
+
 def test_connection_panel_does_not_load_inbox_without_token(monkeypatch) -> None:
     """The connection panel should stop inbox loading when Outlook is not connected."""
     page = _load_outlook_page()

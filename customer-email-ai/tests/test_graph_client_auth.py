@@ -14,6 +14,13 @@ class FakeResponse:
 
     status_code = 401
     reason = "Unauthorized"
+    headers = {
+        "WWW-Authenticate": (
+            'Bearer realm="", authorization_uri="https://login.microsoftonline.com/common/oauth2/authorize", '
+            'error="invalid_token", error_description="Access token eyJabc.def.ghi is invalid", '
+            'access_token="secret-token-value"'
+        )
+    }
 
     def json(self) -> dict[str, Any]:
         return {
@@ -49,3 +56,7 @@ def test_first_graph_401_does_not_immediately_destroy_authentication(monkeypatch
     assert "Microsoft Graph HTTP 401 InvalidAuthenticationToken" in message
     assert "Access token has expired" in message
     assert "expired-token" not in message
+    assert exc_info.value.authenticate_header
+    assert "invalid_token" in exc_info.value.authenticate_header
+    assert "[redacted-token]" in exc_info.value.authenticate_header
+    assert "secret-token-value" not in exc_info.value.authenticate_header

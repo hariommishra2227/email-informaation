@@ -520,7 +520,9 @@ def _friendly_exception_message(exc: Exception) -> str:
         if exc.status_code == 401:
             message = message.rstrip(".")
             audience = graph_auth.access_token_audience() or "missing"
-            return f"Microsoft Graph HTTP 401 {code}: {message}. Token audience: {audience}"
+            authenticate_header = _sanitize_exception_message(getattr(exc, "authenticate_header", "") or "")
+            header_detail = f". WWW-Authenticate: {authenticate_header}" if authenticate_header else ""
+            return f"Microsoft Graph HTTP 401 {code}: {message}. Token audience: {audience}{header_detail}"
         if exc.status_code == 403 and _is_graph_permission_error(str(exc).lower()):
             return "The Mail.Read permission is missing or has not been approved."
         return f"Microsoft Graph HTTP {exc.status_code} {code}: {message}"
