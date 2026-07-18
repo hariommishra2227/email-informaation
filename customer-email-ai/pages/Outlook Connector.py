@@ -615,7 +615,7 @@ def _sanitize_exception_message(message: str) -> str:
 
 def render_page() -> None:
     """Standalone Streamlit multipage entrypoint."""
-    st.set_page_config(page_title="Outlook Connector", page_icon="@", layout="wide")
+    st.set_page_config(page_title="Outlook Connector", page_icon="📧", layout="wide")
     initialize_outlook_session_state()
     try:
         from page_context import ensure_user_safely, initialize_database_safely, selected_user
