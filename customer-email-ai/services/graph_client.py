@@ -46,7 +46,7 @@ def list_inbox_messages(user_id: str, limit: int = 50) -> list[OutlookMessage]:
 
     token = graph_auth.get_valid_access_token()
     next_url = (
-        f"{GRAPH_BASE_URL}/me/mailFolders/inbox/messages"
+        f"{GRAPH_BASE_URL}/me/messages"
         "?$select=id,subject,from,receivedDateTime,bodyPreview,body,isRead,hasAttachments,webLink"
         "&$orderby=receivedDateTime desc&$top=50"
     )

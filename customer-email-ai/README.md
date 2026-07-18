@@ -17,10 +17,10 @@ Use Streamlit Cloud Secrets or local `.streamlit/secrets.toml`. Do not commit re
 
 ```toml
 OUTLOOK_MODE = "live"
-MICROSOFT_CLIENT_ID = "value"
-MICROSOFT_CLIENT_SECRET = "value"
-MICROSOFT_TENANT_ID = "value"
-MICROSOFT_REDIRECT_URI = "value"
+AZURE_CLIENT_ID = "value"
+AZURE_CLIENT_SECRET = "value"
+AZURE_REDIRECT_URI = "https://email-informaation-frmrxrcergpwxbvh5lcqux.streamlit.app/Outlook_Connector"
+AZURE_AUTHORITY = "https://login.microsoftonline.com/common"
 ```
 
 Environment-variable fallback is also supported:
@@ -38,10 +38,10 @@ Environment-variable fallback is also supported:
 The production redirect URI must exactly match:
 
 ```text
-https://email-informaation-frmrxrcergpwxbvh5lcqux.streamlit.app
+https://email-informaation-frmrxrcergpwxbvh5lcqux.streamlit.app/Outlook_Connector
 ```
 
-Do not append `/Outlook_Connector` or `/callback` for the current implementation.
+Use this same value in Microsoft Entra, Streamlit Secrets, the authorization request, and token exchange.
 
 ## Microsoft Entra Configuration
 
@@ -49,7 +49,7 @@ Do not append `/Outlook_Connector` or `/callback` for the current implementation
 2. Create or open an App Registration.
 3. Copy the Application Client ID.
 4. Copy the Directory Tenant ID.
-5. Add a Web platform redirect URI that exactly matches `MICROSOFT_REDIRECT_URI`.
+5. Add a Web platform redirect URI that exactly matches `AZURE_REDIRECT_URI`.
 6. Create a new client secret and copy the Secret Value, not the Secret ID.
 7. Add Microsoft Graph delegated permissions:
    - `User.Read`
@@ -87,14 +87,14 @@ Do not append `/Outlook_Connector` or `/callback` for the current implementation
 - Admin consent required: grant tenant admin consent for the delegated Graph permissions.
 - Tenant mismatch: verify the Directory Tenant ID belongs to the app registration.
 - `Mail.Read` missing: add delegated `Mail.Read` and grant consent if required.
-- App remains in Demo Mode: `OUTLOOK_MODE` is not `live`, or one of the resolved Microsoft/Azure configuration values is missing.
+- App remains in Demo Mode: `OUTLOOK_MODE` is not `live`, or one of the resolved Azure configuration values is missing.
 
 ## Project Structure
 
 - `app.py`: Streamlit dashboard and page link to Outlook Connector.
 - `config.py`: safe configuration from Streamlit Secrets or environment variables.
-- `services/graph_auth.py`: MSAL authorization-code flow with session-only token storage.
-- `services/graph_client.py`: Microsoft Graph `/me` and inbox access, plus demo mailbox support.
+- `services/graph_auth.py`: MSAL authorization-code flow with persisted SerializableTokenCache.
+- `services/graph_client.py`: Microsoft Graph `/me`, `/me/messages`, and demo mailbox support.
 - `services/email_processor.py`: Outlook/PDF/TXT/manual customer extraction pipeline.
 - `storage/database.py`: SQLite schema and parameterized persistence.
 - `pages/Outlook Connector.py`: Outlook sign-in, inbox selection, extraction, registry save, and Excel export.

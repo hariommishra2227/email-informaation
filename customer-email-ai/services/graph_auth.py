@@ -1,4 +1,4 @@
-"""Microsoft delegated authentication helpers with session-only token storage."""
+"""Microsoft delegated authentication helpers with persisted MSAL token cache."""
 
 from __future__ import annotations
 
@@ -172,7 +172,7 @@ def handle_auth_callback() -> bool:
 
 
 def get_valid_access_token() -> str:
-    """Return a non-expired access token from Streamlit session state."""
+    """Return a non-expired access token, renewing through MSAL when needed."""
     if config.is_mock_mode():
         return "mock-access-token"
     token_result = st.session_state.get(TOKEN_STATE_KEY) or {}
@@ -238,8 +238,11 @@ def is_connected() -> bool:
 
 
 def token_exists() -> bool:
-    """Return whether any Outlook token result is present in session state."""
-    if st.session_state.get(TOKEN_STATE_KEY, {}).get("access_token"):
+    """Return whether a current token or persisted MSAL cache exists."""
+    token_result = st.session_state.get(TOKEN_STATE_KEY, {}) or {}
+    access_token = token_result.get("access_token")
+    expires_at = int(token_result.get("expires_at") or 0)
+    if access_token and expires_at > int(time.time()) + 60:
         return True
     cache_json, _account = database.load_oauth_token_cache(_token_cache_owner())
     return bool(cache_json)
@@ -313,7 +316,7 @@ def auth_error() -> str:
 
 
 def _store_token_result(result: dict[str, Any]) -> None:
-    """Store Microsoft token data only in Streamlit session state."""
+    """Store the current token result in session state only."""
     token_result = dict(result)
     token_result["expires_at"] = int(time.time()) + int(token_result.get("expires_in", 0))
     st.session_state[TOKEN_STATE_KEY] = token_result

@@ -28,6 +28,39 @@ def initialize_safe_session_state() -> None:
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
+    initialize_outlook_session_state()
+
+
+def initialize_outlook_session_state() -> None:
+    """Create Outlook-specific session defaults used by dashboard and connector pages."""
+    defaults: dict[str, Any] = {
+        "imported_outlook_message_ids": [],
+        "outlook_messages_cache": [],
+        "outlook_import_summary": None,
+        "selected_outlook_messages": [],
+        "outlook_selected_messages": [],
+        "outlook_token_result": {},
+        "outlook_access_token": None,
+        "outlook_account": {},
+        "outlook_connected_account": None,
+        "outlook_connected_user": {},
+        "outlook_auth_state": "",
+        "outlook_auth_error": "",
+    }
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = _new_session_default(value)
+
+
+def _new_session_default(value: Any) -> Any:
+    """Return a fresh default for mutable session values."""
+    if isinstance(value, list):
+        return list(value)
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, set):
+        return set(value)
+    return value
 
 
 def selected_user() -> str:

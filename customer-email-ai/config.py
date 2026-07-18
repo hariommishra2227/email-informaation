@@ -90,10 +90,10 @@ AZURE_AUTHORITY = _secret_value(
     "https://login.microsoftonline.com/common",
 ).strip()
 
-RESOLVED_CLIENT_ID = MICROSOFT_CLIENT_ID or AZURE_CLIENT_ID
-RESOLVED_CLIENT_SECRET = MICROSOFT_CLIENT_SECRET or AZURE_CLIENT_SECRET
+RESOLVED_CLIENT_ID = AZURE_CLIENT_ID or MICROSOFT_CLIENT_ID
+RESOLVED_CLIENT_SECRET = AZURE_CLIENT_SECRET or MICROSOFT_CLIENT_SECRET
 RESOLVED_TENANT_ID = MICROSOFT_TENANT_ID
-RESOLVED_REDIRECT_URI = MICROSOFT_REDIRECT_URI or AZURE_REDIRECT_URI
+RESOLVED_REDIRECT_URI = AZURE_REDIRECT_URI or MICROSOFT_REDIRECT_URI
 RESOLVED_AUTHORITY = (
     f"https://login.microsoftonline.com/{RESOLVED_TENANT_ID}"
     if RESOLVED_TENANT_ID
@@ -173,9 +173,9 @@ def missing_live_settings() -> list[str]:
     """Return required live-mode setting names that are not configured."""
     required = {
         "OUTLOOK_MODE=live": OUTLOOK_MODE == OUTLOOK_MODE_LIVE,
-        "MICROSOFT_CLIENT_ID": CLIENT_ID,
-        "MICROSOFT_CLIENT_SECRET": CLIENT_SECRET,
-        "MICROSOFT_TENANT_ID": has_authority_configuration(),
-        "MICROSOFT_REDIRECT_URI": REDIRECT_URI,
+        "AZURE_CLIENT_ID": CLIENT_ID,
+        "AZURE_CLIENT_SECRET": CLIENT_SECRET,
+        "AZURE_AUTHORITY": has_authority_configuration(),
+        "AZURE_REDIRECT_URI": REDIRECT_URI,
     }
     return [name for name, value in required.items() if not value]

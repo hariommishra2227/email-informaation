@@ -757,7 +757,7 @@ def upgraded_main() -> None:
     """Run the Outlook-ready Streamlit app."""
     try:
         import config as app_config
-        from page_context import initialize_database_safely, selected_user
+        from page_context import initialize_database_safely, initialize_outlook_session_state, selected_user
         from services import graph_auth
         from services import graph_client
         from storage import database
@@ -768,6 +768,7 @@ def upgraded_main() -> None:
             layout="wide",
         )
         initialize_session_state()
+        initialize_outlook_session_state()
         render_styles()
 
         if not app_config.is_mock_mode():
@@ -795,8 +796,8 @@ def upgraded_main() -> None:
                 if app_config.is_mock_mode() and not database.list_outlook_message_rows(user_id):
                     for message in graph_client.list_inbox_messages(user_id, limit=50):
                         database.upsert_outlook_message(message)
-            except Exception:
-                pass
+            except Exception as exc:
+                st.exception(exc)
             outlook_rows = database.list_outlook_message_rows(user_id)
             customer_rows = database.list_customers(user_id)
             labels = [
@@ -815,7 +816,7 @@ def upgraded_main() -> None:
             st.warning("Dashboard metrics are unavailable until the local database can be initialized.")
     except Exception as exc:
         st.title("Dashboard")
-        st.error("Dashboard could not render. Please try again.")
+        st.exception(exc)
 
 
 main = upgraded_main

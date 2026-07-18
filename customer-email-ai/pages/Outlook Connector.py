@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from html import escape as html_escape
 import logging
 from pathlib import Path
 import re
 import traceback
-from typing import Any
 from urllib.parse import urlparse
 
 import pandas as pd
@@ -17,6 +17,7 @@ IMPORT_ERROR: Exception | None = None
 try:
     import config
     from excel_exporter import EXCEL_FILE_NAME, export_customers_to_excel
+    from page_context import initialize_outlook_session_state
     from services import graph_auth, graph_client
     from services.customer_service import get_customers, to_export_rows
     from services.email_processor import process_outlook_message
@@ -26,38 +27,6 @@ except Exception as exc:  # pragma: no cover
 
 
 LOGGER = logging.getLogger(__name__)
-
-
-def initialize_outlook_session_state() -> None:
-    """Create Outlook session defaults before any UI or Graph logic runs."""
-    defaults: dict[str, Any] = {
-        "imported_outlook_message_ids": [],
-        "outlook_messages_cache": [],
-        "outlook_import_summary": None,
-        "selected_outlook_messages": [],
-        "outlook_selected_messages": [],
-        "outlook_token_result": {},
-        "outlook_access_token": None,
-        "outlook_account": {},
-        "outlook_connected_account": None,
-        "outlook_connected_user": {},
-        "outlook_auth_state": "",
-        "outlook_auth_error": "",
-    }
-    for key, value in defaults.items():
-        if key not in st.session_state:
-            st.session_state[key] = _new_session_default(value)
-
-
-def _new_session_default(value: Any) -> Any:
-    """Return a fresh default for mutable session values."""
-    if isinstance(value, list):
-        return list(value)
-    if isinstance(value, dict):
-        return dict(value)
-    if isinstance(value, set):
-        return set(value)
-    return value
 
 
 def _date_value(value: str) -> date:
@@ -197,16 +166,17 @@ def _render_connection_panel() -> bool:
     login_disabled = _login_is_disabled()
     with status_cols[3]:
         if config.is_mock_mode() or login_disabled:
-            st.button("Connect Outlook", disabled=True, use_container_width=True)
+            st.button("Sign in with Outlook", disabled=True, use_container_width=True)
         elif not graph_auth.is_connected():
-            try:
-                st.link_button("Connect Outlook", graph_auth.create_login_url(), type="primary", use_container_width=True)
-            except Exception as exc:
-                LOGGER.exception("Could not create Microsoft login URL.")
-                st.error(_safe_auth_exception_message(exc))
-                _render_login_url_diagnostics(exc)
+            if st.button("Sign in with Outlook", type="primary", use_container_width=True):
+                try:
+                    _redirect_to_microsoft_login(graph_auth.create_login_url())
+                except Exception as exc:
+                    LOGGER.exception("Could not create Microsoft login URL.")
+                    st.error(_safe_auth_exception_message(exc))
+                    _render_login_url_diagnostics(exc)
         else:
-            st.button("Connect Outlook", disabled=True, use_container_width=True)
+            st.button("Sign in with Outlook", disabled=True, use_container_width=True)
     with status_cols[4]:
         disconnect_disabled = not (graph_auth.token_exists() or graph_auth.connected_user() or graph_auth.auth_error())
         if st.button("Disconnect", disabled=disconnect_disabled, use_container_width=True):
@@ -245,6 +215,16 @@ def _render_connection_panel() -> bool:
         return False
 
     return True
+
+
+def _redirect_to_microsoft_login(auth_url: str) -> None:
+    """Redirect the current Streamlit page to Microsoft without exposing secrets."""
+    safe_url = html_escape(auth_url, quote=True)
+    st.markdown(
+        f'<meta http-equiv="refresh" content="0; url={safe_url}">',
+        unsafe_allow_html=True,
+    )
+    st.info("Opening Microsoft sign-in...")
 
 
 def _login_is_disabled() -> bool:
