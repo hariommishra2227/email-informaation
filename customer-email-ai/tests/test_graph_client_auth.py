@@ -102,7 +102,16 @@ def test_graph_get_sends_exact_bearer_authorization_header(monkeypatch) -> None:
 
     monkeypatch.setattr(graph_client.requests, "get", fake_get)
     monkeypatch.setattr(graph_auth, "auth_diagnostics", lambda: {"silent_token_result": "not_run"})
-    monkeypatch.setitem(graph_auth.st.session_state, graph_auth.TOKEN_STATE_KEY, {"access_token": "latest-token"})
+    monkeypatch.setitem(
+        graph_auth.st.session_state,
+        graph_auth.TOKEN_STATE_KEY,
+        {"access_token": "latest-token"},
+    )
+    monkeypatch.setitem(
+        graph_auth.st.session_state,
+        graph_auth.ACCOUNT_STATE_KEY,
+        {"username": "user@example.com", "home_account_id": "home-1"},
+    )
 
     graph_client._graph_get("https://graph.microsoft.com/v1.0/me", "latest-token")
 
@@ -111,10 +120,69 @@ def test_graph_get_sends_exact_bearer_authorization_header(monkeypatch) -> None:
     assert diagnostics["Authorization Header Present"] == "Yes"
     assert diagnostics["Bearer Prefix"] == "Yes"
     assert diagnostics["Token Length"] == str(len("latest-token"))
+    assert diagnostics["Account Username"] == "user@example.com"
+    assert diagnostics["Account Home Account ID"] == "home-1"
+    assert diagnostics["Current Token Hash"] == diagnostics["Latest MSAL Token Hash"]
     assert diagnostics["Silent Token Used"] == (
         "No - current session token used; silent acquisition skipped because session token was usable"
     )
     assert "latest-token" not in str(diagnostics)
+
+
+def test_paginated_inbox_uses_renewed_token_after_first_401(monkeypatch) -> None:
+    """A renewed token from the first page should be reused for later inbox pages."""
+    calls = []
+
+    class FakeResponse:
+        reason = "OK"
+        headers = {}
+        text = "{}"
+
+        def __init__(self, status_code: int, payload: dict[str, Any]) -> None:
+            self.status_code = status_code
+            self.payload = payload
+
+        def json(self) -> dict[str, Any]:
+            return self.payload
+
+    responses = [
+        FakeResponse(401, {"error": {"code": "InvalidAuthenticationToken", "message": "stale token"}}),
+        FakeResponse(
+            200,
+            {
+                "value": [],
+                "@odata.nextLink": "https://graph.microsoft.com/v1.0/me/messages?page=2",
+            },
+        ),
+        FakeResponse(200, {"value": []}),
+    ]
+
+    def fake_get(url, headers, timeout):
+        calls.append(headers["Authorization"])
+        return responses.pop(0)
+
+    monkeypatch.setattr(graph_client.config, "OUTLOOK_MODE", graph_client.config.OUTLOOK_MODE_LIVE)
+    monkeypatch.setattr(graph_client.config, "CLIENT_ID", "client-id")
+    monkeypatch.setattr(graph_client.config, "CLIENT_SECRET", "client-secret")
+    monkeypatch.setattr(graph_client.config, "AUTHORITY", "https://login.microsoftonline.com/common")
+    monkeypatch.setattr(graph_client.config, "REDIRECT_URI", "https://example.com/callback")
+    monkeypatch.setattr(graph_auth, "get_valid_access_token", lambda: "old-token")
+    monkeypatch.setattr(graph_auth, "acquire_token_silent_once", lambda force_refresh=False: "renewed-token")
+    monkeypatch.setattr(graph_auth, "auth_diagnostics", lambda: {"silent_token_result": "access_token"})
+    monkeypatch.setitem(
+        graph_auth.st.session_state,
+        graph_auth.TOKEN_STATE_KEY,
+        {"access_token": "renewed-token"},
+    )
+    monkeypatch.setattr(graph_client.requests, "get", fake_get)
+
+    graph_client.list_inbox_messages("user-1", limit=100)
+
+    assert calls == [
+        "Bearer old-token",
+        "Bearer renewed-token",
+        "Bearer renewed-token",
+    ]
 
 
 def test_graph_request_diagnostics_decode_safe_access_token_claims(monkeypatch) -> None:

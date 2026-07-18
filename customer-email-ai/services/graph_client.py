@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import base64
+import hashlib
 import json
 import re
 import time
@@ -79,7 +80,7 @@ def list_inbox_messages(user_id: str, limit: int = 50) -> list[OutlookMessage]:
     )
     messages: list[OutlookMessage] = []
     while next_url and len(messages) < limit:
-        payload = _graph_get(next_url, token)
+        payload, token = _graph_get_with_token(next_url, token)
         for item in payload.get("value", []):
             if len(messages) >= limit:
                 break
@@ -147,6 +148,12 @@ def _body_to_text(content: str, content_type: str) -> str:
 
 def _graph_get(url: str, token: str, retry_on_unauthorized: bool = True) -> dict[str, Any]:
     """GET Microsoft Graph JSON and raise clear user-facing failures."""
+    payload, _token = _graph_get_with_token(url, token, retry_on_unauthorized=retry_on_unauthorized)
+    return payload
+
+
+def _graph_get_with_token(url: str, token: str, retry_on_unauthorized: bool = True) -> tuple[dict[str, Any], str]:
+    """GET Microsoft Graph JSON and return the access token that was actually used."""
     headers = _headers(str(token or ""))
     diagnostics = _graph_request_diagnostics("GET", url, str(token or ""), headers)
     _remember_graph_request_diagnostic(diagnostics)
@@ -177,7 +184,9 @@ def _graph_get(url: str, token: str, retry_on_unauthorized: bool = True) -> dict
         )
         renewed_token = graph_auth.acquire_token_silent_once(force_refresh=True)
         if renewed_token:
-            return _graph_get(url, renewed_token, retry_on_unauthorized=False)
+            return _graph_get_with_token(url, renewed_token, retry_on_unauthorized=False)
+        diagnostics["Latest MSAL Token Hash"] = _session_access_token_hash()
+        _remember_graph_request_diagnostic(diagnostics)
         LOGGER.warning("Microsoft Graph 401 silent renewal did not return an access token.")
     if response.status_code == 401:
         raise GraphApiError(
@@ -200,7 +209,7 @@ def _graph_get(url: str, token: str, retry_on_unauthorized: bool = True) -> dict
             stack_info=True,
         )
         raise GraphApiError(response.status_code, graph_error["code"], graph_error["message"])
-    return response.json()
+    return response.json(), str(token or "")
 
 
 def last_graph_request_diagnostic() -> dict[str, str]:
@@ -276,10 +285,16 @@ def _graph_request_diagnostics(method: str, url: str, token: str, headers: dict[
     diagnostics = {
         "Request URL": _safe_graph_url(url),
         "HTTP Method": method,
+        "Token Source": token_status,
+        "Account Username": _session_account_value("username"),
+        "Account Home Account ID": _session_account_value("home_account_id"),
         "Authorization Header Present": "Yes" if authorization else "No",
         "Bearer Prefix": "Yes" if authorization.startswith("Bearer ") else "No",
         "Token Length": str(len(token or "")),
         "Token Expired": _token_expired_label(token),
+        "Token Expiry": _token_claim_value(token, "exp"),
+        "Current Token Hash": _token_hash(token),
+        "Latest MSAL Token Hash": _session_access_token_hash(),
         "Silent Token Used": token_status,
         "HTTP Status": "",
         "WWW-Authenticate": "",
@@ -317,14 +332,19 @@ def _remember_graph_request_diagnostic(diagnostics: dict[str, str]) -> None:
 def _log_graph_request_diagnostics(diagnostics: dict[str, str]) -> None:
     """Log safe request details before a Graph request is sent."""
     LOGGER.info(
-        "Microsoft Graph request method=%s url=%s authorization_present=%s bearer_prefix=%s token_length=%s token_expired=%s silent_token_used=%s",
+        "Microsoft Graph request method=%s url=%s token_source=%s account_username=%s account_home_account_id=%s authorization_present=%s bearer_prefix=%s token_length=%s token_expiry=%s token_expired=%s aud=%s scp=%s",
         diagnostics["HTTP Method"],
         diagnostics["Request URL"],
+        diagnostics["Token Source"],
+        diagnostics["Account Username"],
+        diagnostics["Account Home Account ID"],
         diagnostics["Authorization Header Present"],
         diagnostics["Bearer Prefix"],
         diagnostics["Token Length"],
+        diagnostics["Token Expiry"],
         diagnostics["Token Expired"],
-        diagnostics["Silent Token Used"],
+        diagnostics.get("Token Claim aud", ""),
+        diagnostics.get("Token Claim scp", ""),
     )
 
 
@@ -358,6 +378,38 @@ def _session_token_status(token: str) -> str:
     if silent_result in {"not_run", ""}:
         return "No - silent acquisition has not run"
     return f"No - silent acquisition result: {silent_result}"
+
+
+def _session_account_value(key: str) -> str:
+    """Return safe current account metadata for request diagnostics."""
+    try:
+        account = graph_auth.st.session_state.get(graph_auth.ACCOUNT_STATE_KEY, {}) or {}
+        if not account:
+            account = graph_auth.connected_user() or {}
+    except Exception:
+        return ""
+    return _sanitize_graph_error(str(account.get(key) or ""))
+
+
+def _session_access_token_hash() -> str:
+    """Return a short hash of the latest session access token without exposing it."""
+    try:
+        token_result = graph_auth.st.session_state.get(graph_auth.TOKEN_STATE_KEY, {}) or {}
+        return _token_hash(str(token_result.get("access_token") or ""))
+    except Exception:
+        return ""
+
+
+def _token_hash(token: str) -> str:
+    """Return a short stable token fingerprint without exposing token material."""
+    if not token:
+        return ""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
+
+
+def _token_claim_value(token: str, claim_name: str) -> str:
+    """Return one safe decoded JWT claim value."""
+    return _format_claim_value(_decode_jwt_payload(token).get(claim_name))
 
 
 def _decode_jwt_payload(token: str) -> dict[str, Any]:

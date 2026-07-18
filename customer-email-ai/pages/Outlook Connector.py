@@ -566,10 +566,16 @@ def _format_graph_request_diagnostic(diagnostics: dict[str, str]) -> str:
     """Return the safe Microsoft Graph request diagnostic block."""
     rows = {
         "Request URL": diagnostics.get("Request URL", ""),
+        "Token Source": diagnostics.get("Token Source", ""),
+        "Account Username": diagnostics.get("Account Username", ""),
+        "Account Home Account ID": diagnostics.get("Account Home Account ID", ""),
         "Authorization Header Present": diagnostics.get("Authorization Header Present", ""),
         "Bearer Prefix": diagnostics.get("Bearer Prefix", ""),
         "Token Length": diagnostics.get("Token Length", ""),
+        "Token Expiry": diagnostics.get("Token Expiry", ""),
         "Token Expired": diagnostics.get("Token Expired", ""),
+        "Current Token Hash": diagnostics.get("Current Token Hash", ""),
+        "Latest MSAL Token Hash": diagnostics.get("Latest MSAL Token Hash", ""),
         "Silent Token Used": diagnostics.get("Silent Token Used", ""),
         "HTTP Status": diagnostics.get("HTTP Status", ""),
         "WWW-Authenticate": diagnostics.get("WWW-Authenticate", ""),
