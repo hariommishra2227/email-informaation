@@ -30,7 +30,10 @@ AUTH_FLOW_STATE_KEY = "outlook_auth_flow"
 AUTH_CODE_ATTEMPT_STATE_KEY = "outlook_auth_code_attempt"
 AUTH_CODE_SUCCESS_STATE_KEY = "outlook_auth_code_success"
 AUTH_ERROR_STATE_KEY = "outlook_auth_error"
+CALLBACK_CACHE_SAVED_STATE_KEY = "outlook_callback_cache_saved"
+SILENT_RESULT_STATE_KEY = "outlook_silent_token_result"
 REQUIRED_MAIL_SCOPE = "Mail.Read"
+SILENT_TOKEN_SCOPES = ["User.Read", "Mail.Read"]
 AUTH_FLOW_TTL_SECONDS = 600
 
 
@@ -61,6 +64,7 @@ def create_login_url() -> str:
     now = int(time.time())
     database.delete_expired_oauth_auth_flows(now)
     st.session_state[AUTH_ERROR_STATE_KEY] = ""
+    LOGGER.debug("create_auth_flow: auth_flow exists=%s state=%s", False, "")
 
     flow_id = secrets.token_urlsafe(32)
     token_cache, _account = _load_msal_token_cache()
@@ -89,6 +93,11 @@ def create_login_url() -> str:
     return auth_uri
 
 
+def get_authorization_url() -> str:
+    """Create a Microsoft authorization URL for the top-level Outlook sign-in link."""
+    return create_login_url()
+
+
 def acquire_token_by_authorization_code(code: str) -> dict[str, Any]:
     """Exchange an authorization code for delegated Microsoft Graph tokens."""
     if config.is_mock_mode():
@@ -103,7 +112,10 @@ def acquire_token_by_authorization_code(code: str) -> dict[str, Any]:
     if "access_token" not in result:
         raise RuntimeError(_format_token_error(result))
     _store_token_result(result)
-    _persist_msal_token_cache(token_cache, _account_from_result_or_cache(result, app, stored_account))
+    _remember_callback_cache_saved(
+        _persist_msal_token_cache(token_cache, _account_from_result_or_cache(result, app, stored_account))
+    )
+    _verify_persisted_msal_cache()
     if not has_granted_scope(REQUIRED_MAIL_SCOPE, result):
         granted = ", ".join(granted_scopes(result)) or "none"
         raise RuntimeError(f"Microsoft token did not include {REQUIRED_MAIL_SCOPE}. Granted scopes: {granted}.")
@@ -116,11 +128,27 @@ def acquire_token_by_auth_code_flow(flow: dict[str, Any], callback_params: dict[
         return {"access_token": "mock-access-token", "account": {"username": config.APP_USER_EMAIL}}
     token_cache, stored_account = _load_msal_token_cache()
     app = _build_msal_app(token_cache)
+    LOGGER.debug(
+        "acquire_token_by_auth_code_flow: auth_flow exists=%s state=%s request_code=%s",
+        bool(flow),
+        str(flow.get("state") or ""),
+        _safe_code_debug(callback_params.get("code")),
+    )
     result = app.acquire_token_by_auth_code_flow(flow, callback_params)
+    LOGGER.debug(
+        "acquire_token_by_auth_code_flow: token exchange result access_token=%s account=%s error=%s cache_changed=%s",
+        "access_token" in result,
+        bool(result.get("account")),
+        str(result.get("error") or ""),
+        bool(getattr(token_cache, "has_state_changed", False)),
+    )
     if "access_token" not in result:
         raise RuntimeError(_format_token_error(result))
     _store_token_result(result)
-    _persist_msal_token_cache(token_cache, _account_from_result_or_cache(result, app, stored_account))
+    _remember_callback_cache_saved(
+        _persist_msal_token_cache(token_cache, _account_from_result_or_cache(result, app, stored_account))
+    )
+    _verify_persisted_msal_cache()
     if not has_granted_scope(REQUIRED_MAIL_SCOPE, result):
         granted = ", ".join(granted_scopes(result)) or "none"
         raise RuntimeError(f"Microsoft token did not include {REQUIRED_MAIL_SCOPE}. Granted scopes: {granted}.")
@@ -145,7 +173,7 @@ def handle_auth_callback() -> bool:
         return False
     code = params.get("code")
     if not code:
-        return has_valid_access_token()
+        return is_connected()
 
     flow_id = str(params.get("state") or "")
     if not flow_id:
@@ -205,49 +233,72 @@ def handle_auth_callback() -> bool:
 
 
 def get_valid_access_token() -> str:
-    """Return a non-expired access token, renewing through MSAL when needed."""
+    """Return a usable access token, preferring the fresh Streamlit session token."""
     if config.is_mock_mode():
         return "mock-access-token"
-    token_result = st.session_state.get(TOKEN_STATE_KEY) or {}
-    access_token = token_result.get("access_token")
-    expires_at = int(token_result.get("expires_at") or 0)
-    if access_token and expires_at > int(time.time()) + 60:
-        return str(access_token)
 
-    silent_token = acquire_token_silent_once(force_refresh=False, clear_on_failure=True)
+    token_result = st.session_state.get(TOKEN_STATE_KEY, {}) or {}
+    access_token = str(token_result.get("access_token") or "")
+
+    try:
+        expires_at = int(token_result.get("expires_at") or 0)
+    except (TypeError, ValueError):
+        expires_at = 0
+
+    if access_token and expires_at > int(time.time()) + 60:
+        LOGGER.info("Using current Streamlit session access token.")
+        return access_token
+
+    silent_token = acquire_token_silent_once(
+        force_refresh=False,
+        clear_on_failure=False,
+    )
     if silent_token:
         return silent_token
 
-    logout_user()
-    raise RuntimeError("Your Microsoft session expired. Sign in again.")
+    raise RuntimeError("Outlook is not connected. Please sign in with Outlook.")
 
 
 def acquire_token_silent_once(force_refresh: bool = False, clear_on_failure: bool = False) -> str | None:
     """Try to restore or renew an access token from the persisted MSAL cache."""
     if config.is_mock_mode():
         return "mock-access-token"
+    LOGGER.info("Starting MSAL silent token acquisition force_refresh=%s.", force_refresh)
     token_cache, stored_account = _load_msal_token_cache()
     app = _build_msal_app(token_cache)
     account = _select_account(app, stored_account)
     if not account:
-        if clear_on_failure:
-            _clear_persisted_auth()
+        LOGGER.warning("MSAL silent token acquisition skipped: no account found in token cache.")
+        _remember_silent_token_result("no_account")
         return None
 
-    result = _acquire_token_silent(app, account, force_refresh=force_refresh)
+    result = _acquire_token_silent(app, account, SILENT_TOKEN_SCOPES, force_refresh=force_refresh)
+    _persist_msal_token_cache(token_cache, account)
     if result and "access_token" in result:
         _store_token_result(result)
         _persist_msal_token_cache(token_cache, _account_from_result_or_cache(result, app, account))
+        _remember_silent_token_result("access_token")
+        LOGGER.info(
+            "MSAL silent token acquisition succeeded for scopes=%s.",
+            " ".join(granted_scopes(result)),
+        )
         return str(result["access_token"])
 
     if result and ("error" in result or "error_description" in result):
         st.session_state[AUTH_ERROR_STATE_KEY] = _format_token_error(result)
-    if clear_on_failure:
-        _clear_persisted_auth()
+        _remember_silent_token_result(str(result.get("error") or "token_error"))
+        LOGGER.warning(
+            "MSAL silent token acquisition failed: %s",
+            _format_token_error(result),
+            stack_info=True,
+        )
+    else:
+        _remember_silent_token_result("no_result")
+        LOGGER.warning("MSAL silent token acquisition returned no result.", stack_info=True)
     return None
 
 
-def logout_user() -> None:
+def logout_user(clear_persisted: bool = True) -> None:
     """Disconnect Outlook by removing account and token data from session state."""
     st.session_state[TOKEN_STATE_KEY] = {}
     st.session_state[ACCOUNT_STATE_KEY] = {}
@@ -258,16 +309,42 @@ def logout_user() -> None:
     st.session_state["selected_outlook_messages"] = []
     st.session_state["outlook_selected_messages"] = []
     st.session_state["outlook_import_summary"] = None
-    _clear_persisted_auth()
+    st.session_state[SILENT_RESULT_STATE_KEY] = ""
+    if clear_persisted:
+        _clear_persisted_auth()
 
 
 def is_connected() -> bool:
-    """Return whether the current Streamlit session has a usable Outlook token."""
+    """Return whether the current session or persisted cache has a usable token."""
+    if config.is_mock_mode():
+        return True
+
+    token_result = st.session_state.get(TOKEN_STATE_KEY, {}) or {}
+    access_token = str(token_result.get("access_token") or "")
+
     try:
-        get_valid_access_token()
-        return has_granted_scope(REQUIRED_MAIL_SCOPE)
-    except Exception:
-        return False
+        expires_at = int(token_result.get("expires_at") or 0)
+    except (TypeError, ValueError):
+        expires_at = 0
+
+    if (
+        access_token
+        and expires_at > int(time.time()) + 60
+        and has_granted_scope(REQUIRED_MAIL_SCOPE, token_result)
+    ):
+        LOGGER.info("Outlook is connected using current Streamlit session token.")
+        return True
+
+    silent_token = acquire_token_silent_once(
+        force_refresh=False,
+        clear_on_failure=False,
+    )
+    connected = bool(
+        silent_token
+        and has_granted_scope(REQUIRED_MAIL_SCOPE)
+    )
+    LOGGER.info("Outlook connected via persisted MSAL cache: %s.", connected)
+    return connected
 
 
 def token_exists() -> bool:
@@ -348,6 +425,47 @@ def auth_error() -> str:
     return str(st.session_state.get(AUTH_ERROR_STATE_KEY, ""))
 
 
+def auth_diagnostics() -> dict[str, str]:
+    """Return safe Outlook auth diagnostics without exposing token material."""
+    if config.is_mock_mode():
+        return {
+            "persisted_cache_exists": "No",
+            "accounts_found": "0",
+            "silent_token_result": "mock",
+            "cache_saved_after_callback": "No",
+        }
+    try:
+        cache_json, stored_account = database.load_oauth_token_cache(_token_cache_owner())
+    except Exception:
+        return {
+            "persisted_cache_exists": "Unknown",
+            "accounts_found": "0",
+            "silent_token_result": "database_error",
+            "cache_saved_after_callback": "Yes" if _session_state_get(CALLBACK_CACHE_SAVED_STATE_KEY) else "No",
+            "cache_owner": _token_cache_owner(),
+            "stored_account": "Unknown",
+        }
+    accounts_count = 0
+    try:
+        token_cache = _new_msal_token_cache()
+        if token_cache is not None and cache_json:
+            token_cache.deserialize(cache_json)
+        app = _build_msal_app(token_cache)
+        accounts_count = len(_get_accounts(app))
+    except Exception as exc:
+        st.session_state[AUTH_ERROR_STATE_KEY] = _format_token_error(
+            {"error": exc.__class__.__name__, "error_description": str(exc)}
+        )
+    return {
+        "persisted_cache_exists": "Yes" if cache_json else "No",
+        "accounts_found": str(accounts_count),
+        "silent_token_result": str(_session_state_get(SILENT_RESULT_STATE_KEY) or "not_run"),
+        "cache_saved_after_callback": "Yes" if _session_state_get(CALLBACK_CACHE_SAVED_STATE_KEY) else "No",
+        "cache_owner": _token_cache_owner(),
+        "stored_account": "Yes" if stored_account else "No",
+    }
+
+
 def _store_token_result(result: dict[str, Any]) -> None:
     """Store the current token result in session state only."""
     token_result = dict(result)
@@ -375,23 +493,114 @@ def _load_msal_token_cache() -> tuple[Any | None, dict[str, Any] | None]:
     """Load the serialized MSAL cache and account metadata from SQLite."""
     token_cache = _new_msal_token_cache()
     cache_json, account = database.load_oauth_token_cache(_token_cache_owner())
+    LOGGER.debug(
+        "MSAL token cache load: cache_exists=%s account_exists=%s owner=%s",
+        bool(cache_json),
+        bool(account),
+        _token_cache_owner(),
+    )
     if token_cache is not None and cache_json:
         token_cache.deserialize(cache_json)
+        LOGGER.debug(
+            "MSAL token cache load: deserialized=%s cache_changed=%s",
+            True,
+            bool(getattr(token_cache, "has_state_changed", False)),
+        )
     return token_cache, account
 
 
-def _persist_msal_token_cache(token_cache: Any | None, account: dict[str, Any] | None) -> None:
+def _persist_msal_token_cache(token_cache: Any | None, account: dict[str, Any] | None) -> bool:
     """Persist the MSAL token cache when it has changed."""
     if token_cache is None:
-        return
+        LOGGER.debug("MSAL token cache save skipped: cache_exists=%s", False)
+        return False
     if not getattr(token_cache, "has_state_changed", False):
-        return
+        LOGGER.debug("MSAL token cache save skipped: cache_changed=%s", False)
+        return False
     database.store_oauth_token_cache(
         cache_owner=_token_cache_owner(),
         cache_json=str(token_cache.serialize()),
         account=_safe_account_metadata(account or {}),
         updated_at=int(time.time()),
     )
+    LOGGER.debug(
+        "MSAL token cache save: saved=%s owner=%s account_exists=%s",
+        True,
+        _token_cache_owner(),
+        bool(account),
+    )
+    return True
+
+
+def _verify_persisted_msal_cache() -> None:
+    """Verify the callback persisted a reloadable MSAL cache."""
+    cache_json, _account = database.load_oauth_token_cache(_token_cache_owner())
+    LOGGER.debug("MSAL token cache verify: cache_exists=%s", bool(cache_json))
+    if not cache_json:
+        raise RuntimeError("Microsoft token cache was not saved. Please connect Outlook again.")
+    token_cache = _new_msal_token_cache()
+    if token_cache is not None:
+        token_cache.deserialize(cache_json)
+
+
+def _remember_callback_cache_saved(saved: bool) -> None:
+    """Remember whether the callback persisted the MSAL cache."""
+    st.session_state[CALLBACK_CACHE_SAVED_STATE_KEY] = bool(saved)
+
+
+def _remember_silent_token_result(status: str) -> None:
+    """Remember safe silent-acquisition status for diagnostics."""
+    st.session_state[SILENT_RESULT_STATE_KEY] = status
+
+
+def _session_state_get(key: str, default: Any = None) -> Any:
+    """Read Streamlit session state from dict-like or object-like test doubles."""
+    getter = getattr(st.session_state, "get", None)
+    if callable(getter):
+        return getter(key, default)
+    return getattr(st.session_state, key, default)
+
+
+def _session_auth_flow(flow_id: str) -> dict[str, Any] | None:
+    """Return the saved Streamlit auth flow for this callback state."""
+    flow = st.session_state.get(AUTH_FLOW_STATE_KEY)
+    if not isinstance(flow, dict):
+        return None
+    return flow if str(flow.get("state") or "") == flow_id else None
+
+
+def _safe_fingerprint(value: str) -> str:
+    """Return a short non-secret fingerprint for correlating callback logs."""
+    if not value:
+        return ""
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+
+
+def _safe_code_debug(value: Any) -> str:
+    """Describe an authorization code without logging the secret code itself."""
+    code = str(value or "")
+    if not code:
+        return "present=False"
+    return f"present=True length={len(code)} sha256={_safe_fingerprint(code)}"
+
+
+def _session_token_diagnostics() -> dict[str, str]:
+    """Return safe diagnostics for the current session token without exposing it."""
+    token_result = _session_state_get(TOKEN_STATE_KEY, {}) or {}
+    access_token = str(token_result.get("access_token") or "")
+    expires_at = int(token_result.get("expires_at") or 0)
+    now = int(time.time())
+    claims = _decode_jwt_payload(access_token)
+    scopes = str(claims.get("scp") or token_result.get("scope") or "").strip()
+    return {
+        "session_token_exists": "Yes" if access_token else "No",
+        "session_token_expires_at": str(expires_at or ""),
+        "session_token_expired": "Yes" if expires_at and expires_at <= now + 60 else "No",
+        "session_token_aud": str(claims.get("aud") or ""),
+        "session_token_tid": str(claims.get("tid") or ""),
+        "session_token_scopes": ", ".join(scope for scope in scopes.split() if scope),
+        "session_current_timestamp": str(now),
+    }
 
 
 def _clear_persisted_auth() -> None:
@@ -452,12 +661,18 @@ def _safe_account_metadata(account: dict[str, Any]) -> dict[str, Any]:
     return {key: str(account.get(key, "")) for key in safe_keys if account.get(key)}
 
 
-def _acquire_token_silent(app: Any, account: dict[str, Any], force_refresh: bool = False) -> dict[str, Any] | None:
+def _acquire_token_silent(
+    app: Any,
+    account: dict[str, Any],
+    scopes: list[str] | None = None,
+    force_refresh: bool = False,
+) -> dict[str, Any] | None:
     """Call MSAL acquire_token_silent while tolerating older/test signatures."""
+    requested_scopes = scopes or SILENT_TOKEN_SCOPES
     try:
-        return app.acquire_token_silent(config.GRAPH_SCOPES, account=account, force_refresh=force_refresh)
+        return app.acquire_token_silent(requested_scopes, account=account, force_refresh=force_refresh)
     except TypeError:
-        return app.acquire_token_silent(config.GRAPH_SCOPES, account=account)
+        return app.acquire_token_silent(requested_scopes, account=account)
 
 
 def _rerun_after_callback() -> None:
@@ -547,5 +762,6 @@ def _friendly_error_text(message: str) -> str:
 
 
 get_login_url = create_login_url
+authorization_url = get_authorization_url
 exchange_authorization_code = acquire_token_by_authorization_code
 get_access_token = get_valid_access_token

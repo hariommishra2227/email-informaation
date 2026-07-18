@@ -131,6 +131,7 @@ def render(user_id: str) -> None:
 def _render_connection_panel() -> bool:
     """Render Outlook connection state and return whether inbox loading can continue."""
     st.subheader("Outlook Connection")
+    callback_in_progress = _auth_callback_in_progress()
     if not config.is_mock_mode():
         try:
             graph_auth.handle_auth_callback()
@@ -138,7 +139,15 @@ def _render_connection_panel() -> bool:
             LOGGER.exception("Microsoft authorization callback failed.")
             st.error(_safe_auth_exception_message(exc))
 
-    status_label = "Demo Mode" if config.is_mock_mode() else ("Connected" if graph_auth.is_connected() else "Outlook not connected")
+    is_connected = config.is_mock_mode() or graph_auth.is_connected()
+    microsoft_configured = config.is_microsoft_configured()
+    can_start_login = (
+        not config.is_mock_mode()
+        and microsoft_configured
+        and not callback_in_progress
+        and not is_connected
+    )
+    status_label = "Demo Mode" if config.is_mock_mode() else ("Connected" if is_connected else "Outlook not connected")
     mode_label = "Demo Mode" if config.is_mock_mode() else "Real Mode"
     account = "Demo account" if config.is_mock_mode() else "Not connected"
 
@@ -162,18 +171,15 @@ def _render_connection_panel() -> bool:
         st.metric("Connected account", account)
     with status_cols[2]:
         st.metric("Current mode", mode_label)
-    login_disabled = _login_is_disabled()
     with status_cols[3]:
-        if config.is_mock_mode() or login_disabled:
-            st.button("Sign in with Outlook", disabled=True, use_container_width=True)
-        elif not graph_auth.is_connected():
+        if can_start_login:
             try:
-                authorization_url = graph_auth.create_login_url()
+                authorization_url = graph_auth.get_authorization_url()
                 st.link_button(
-                    "Sign in with Outlook",
+                    config.OUTLOOK_SIGN_IN_LABEL,
                     authorization_url,
                     type="primary",
-                    icon="🔐",
+                    icon=config.OUTLOOK_SIGN_IN_ICON,
                     use_container_width=True,
                 )
             except Exception as exc:
@@ -181,9 +187,9 @@ def _render_connection_panel() -> bool:
                 st.error(_safe_auth_exception_message(exc))
                 _render_login_url_diagnostics(exc)
         else:
-            st.button("Sign in with Outlook", disabled=True, use_container_width=True)
+            st.button(config.OUTLOOK_SIGN_IN_LABEL, disabled=True, use_container_width=True)
     with status_cols[4]:
-        disconnect_disabled = not (graph_auth.token_exists() or graph_auth.connected_user() or graph_auth.auth_error())
+        disconnect_disabled = not is_connected
         if st.button("Disconnect", disabled=disconnect_disabled, use_container_width=True):
             graph_auth.logout_user()
             initialize_outlook_session_state()
@@ -194,7 +200,7 @@ def _render_connection_panel() -> bool:
 
     _render_safe_diagnostics()
 
-    if login_disabled:
+    if not config.is_mock_mode() and not microsoft_configured:
         st.caption("Microsoft login will be available after Client ID, Client Secret, Tenant ID and Redirect URI are configured.")
 
     if config.is_mock_mode():
@@ -208,7 +214,7 @@ def _render_connection_panel() -> bool:
         st.warning("Outlook sign-in is not configured yet.")
         return False
 
-    if not graph_auth.is_connected():
+    if not is_connected:
         return False
 
     try:
@@ -222,11 +228,12 @@ def _render_connection_panel() -> bool:
     return True
 
 
-def _login_is_disabled() -> bool:
-    """Return whether the Microsoft login button should be disabled."""
+def _auth_callback_in_progress() -> bool:
+    """Return whether this render is actively processing a Microsoft callback."""
     if config.is_mock_mode():
-        return True
-    return not config.is_microsoft_configured()
+        return False
+    params = getattr(st, "query_params", {})
+    return "code" in params and "state" in params
 
 
 def _render_safe_diagnostics() -> None:
@@ -245,6 +252,18 @@ def _render_safe_diagnostics() -> None:
         "Token exists": "Yes" if graph_auth.token_exists() else "No",
         "Granted scopes": ", ".join(graph_auth.granted_scopes()) or "None",
     }
+    if not config.is_mock_mode():
+        diagnostics = graph_auth.auth_diagnostics()
+        rows.update(
+            {
+                "Persisted cache exists": diagnostics.get("persisted_cache_exists", "No"),
+                "Accounts found in cache": diagnostics.get("accounts_found", "0"),
+                "Silent token result": diagnostics.get("silent_token_result", "not_run"),
+                "Cache saved after callback": diagnostics.get("cache_saved_after_callback", "No"),
+                "Token cache owner": diagnostics.get("cache_owner", "unknown"),
+                "Stored account metadata": diagnostics.get("stored_account", "No"),
+            }
+        )
     with st.expander("Outlook diagnostics", expanded=False):
         for label, value in rows.items():
             st.write(f"**{label}:** {value}")
@@ -488,6 +507,15 @@ def _render_customer_preview(user_id: str) -> None:
 
 def _friendly_exception_message(exc: Exception) -> str:
     """Return a simple UI message for technical failures."""
+    if isinstance(exc, graph_client.GraphApiError):
+        code = exc.code or "GraphError"
+        message = _sanitize_exception_message(exc.graph_message or str(exc))
+        if exc.status_code == 401 and code.lower() == "invalidauthenticationtoken":
+            return "Your Outlook session expired. Please sign in again."
+        if exc.status_code == 403 and _is_graph_permission_error(str(exc).lower()):
+            return "The Mail.Read permission is missing or has not been approved."
+        return f"Microsoft Graph HTTP {exc.status_code} {code}: {message}"
+
     message = _sanitize_exception_message(str(exc))
     lower = message.lower()
     if _is_graph_permission_error(lower):
@@ -495,12 +523,10 @@ def _friendly_exception_message(exc: Exception) -> str:
     auth_message = _friendly_auth_error_message(lower)
     if auth_message:
         return auth_message
-    if "expired" in lower:
-        return "Your Outlook session expired. Please sign in again."
     if "network" in lower:
         return "Network failure while contacting Microsoft. Please try again."
     if "graph" in lower:
-        return "Microsoft Graph could not complete the request. Please try again."
+        return _safe_exception_detail(exc, message)
     if "database" in lower:
         return "The database could not save Outlook data. Please try again."
     if "mailbox" in lower:
@@ -610,7 +636,7 @@ def _sanitize_exception_message(message: str) -> str:
 
 def render_page() -> None:
     """Standalone Streamlit multipage entrypoint."""
-    st.set_page_config(page_title="Outlook Connector", page_icon="📧", layout="wide")
+    st.set_page_config(page_title="Outlook Connector", page_icon=config.APP_PAGE_ICON, layout="wide")
     initialize_outlook_session_state()
     try:
         from page_context import ensure_user_safely, initialize_database_safely, selected_user

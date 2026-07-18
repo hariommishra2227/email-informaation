@@ -64,6 +64,8 @@ class FakeMsalApp:
 
     def __init__(self, token_cache: FakeSerializableTokenCache | None = None, result: dict[str, Any] | None = None) -> None:
         self.token_cache = token_cache
+        self.silent_calls = 0
+        self.silent_result: dict[str, Any] | None = None
         self.accounts = [
             {
                 "home_account_id": "home-1",
@@ -111,6 +113,9 @@ class FakeMsalApp:
         account: dict[str, Any],
         force_refresh: bool = False,
     ) -> dict[str, Any]:
+        self.silent_calls += 1
+        if self.silent_result is not None:
+            return dict(self.silent_result)
         token = "renewed-token" if force_refresh else "silent-token"
         return {
             "access_token": token,
@@ -139,8 +144,26 @@ def _configure_live_auth(monkeypatch, fake_st: FakeStreamlit, app: FakeMsalApp |
     )
     monkeypatch.setattr(graph_auth, "st", fake_st)
     monkeypatch.setattr(graph_auth, "msal", FakeMsalModule)
-    monkeypatch.setattr(graph_auth, "_build_msal_app", lambda token_cache=None: app or FakeMsalApp(token_cache))
+
+    def build_app(token_cache=None):
+        if app is not None:
+            app.token_cache = token_cache
+            return app
+        return FakeMsalApp(token_cache)
+
+    monkeypatch.setattr(graph_auth, "_build_msal_app", build_app)
     database.initialize_database(db_path)
+
+
+def _unsigned_jwt_with_claims(claims: dict[str, Any]) -> str:
+    """Return an unsigned JWT-shaped string for safe claim decoding tests."""
+    header = {"alg": "none", "typ": "JWT"}
+
+    def encode(data: dict[str, Any]) -> str:
+        raw = json.dumps(data, separators=(",", ":")).encode("utf-8")
+        return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+    return f"{encode(header)}.{encode(claims)}."
 
 
 def test_auth_code_flow_successful_state_match(monkeypatch) -> None:
@@ -154,6 +177,7 @@ def test_auth_code_flow_successful_state_match(monkeypatch) -> None:
     assert graph_auth.handle_auth_callback()
     assert graph_auth.token_exists()
     assert fake_st.query_params == {}
+    assert fake_st.session_state[graph_auth.CALLBACK_CACHE_SAVED_STATE_KEY]
     cache_json, account = database.load_oauth_token_cache(config.DEFAULT_USER_ID)
     assert cache_json
     assert account["home_account_id"] == "home-1"
@@ -270,6 +294,7 @@ def test_cache_restored_after_new_streamlit_session(monkeypatch) -> None:
 
     assert graph_auth.get_valid_access_token() == "silent-token"
     assert graph_auth.token_exists()
+    assert new_fake_st.session_state[graph_auth.SILENT_RESULT_STATE_KEY] == "access_token"
 
 
 def test_silent_token_renewal_force_refresh(monkeypatch) -> None:
@@ -285,7 +310,7 @@ def test_silent_token_renewal_force_refresh(monkeypatch) -> None:
     assert graph_auth.acquire_token_silent_once(force_refresh=True) == "renewed-token"
 
 
-def test_missing_or_expired_token_clears_cache(monkeypatch) -> None:
+def test_missing_or_expired_token_keeps_persisted_cache(monkeypatch) -> None:
     fake_st = FakeStreamlit()
     empty_app = FakeMsalApp()
     empty_app.accounts = []
@@ -299,4 +324,5 @@ def test_missing_or_expired_token_clears_cache(monkeypatch) -> None:
 
     assert graph_auth.acquire_token_silent_once(clear_on_failure=True) is None
     cache_json, _account = database.load_oauth_token_cache(config.DEFAULT_USER_ID)
-    assert cache_json == ""
+    assert cache_json == '{"cached": true}'
+    assert fake_st.session_state[graph_auth.SILENT_RESULT_STATE_KEY] == "no_account"

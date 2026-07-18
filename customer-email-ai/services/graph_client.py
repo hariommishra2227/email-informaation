@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 import requests
@@ -17,6 +18,17 @@ from services.outlook_email_service import get_mock_message, list_mock_messages
 LOGGER = logging.getLogger(__name__)
 GRAPH_BASE_URL = "https://graph.microsoft.com/v1.0"
 REQUEST_TIMEOUT_SECONDS = 20
+
+
+class GraphApiError(RuntimeError):
+    """Microsoft Graph failure with safe diagnostic fields."""
+
+    def __init__(self, status_code: int, code: str, message: str) -> None:
+        self.status_code = int(status_code)
+        self.code = _sanitize_graph_error(code or "")
+        self.graph_message = _sanitize_graph_error(message or "")
+        detail = self.graph_message or self.code or "Microsoft Graph request failed."
+        super().__init__(f"Microsoft Graph HTTP {self.status_code} {self.code}: {detail}")
 
 
 def _headers(access_token: str) -> dict[str, str]:
@@ -35,6 +47,7 @@ def get_current_user(user_id: str | None = None) -> dict[str, Any]:
         }
 
     token = graph_auth.get_valid_access_token()
+    LOGGER.info("Calling Microsoft Graph current-user endpoint.")
     return _graph_get(f"{GRAPH_BASE_URL}/me", token)
 
 
@@ -45,6 +58,7 @@ def list_inbox_messages(user_id: str, limit: int = 50) -> list[OutlookMessage]:
         return list_mock_messages(user_id, limit=limit)
 
     token = graph_auth.get_valid_access_token()
+    LOGGER.info("Calling Microsoft Graph inbox endpoint with limit=%s.", limit)
     next_url = (
         f"{GRAPH_BASE_URL}/me/messages"
         "?$select=id,subject,from,receivedDateTime,bodyPreview,body,isRead,hasAttachments,webLink"
@@ -123,28 +137,95 @@ def _graph_get(url: str, token: str, retry_on_unauthorized: bool = True) -> dict
     try:
         response = requests.get(url, headers=_headers(token), timeout=REQUEST_TIMEOUT_SECONDS)
     except requests.RequestException as exc:
-        LOGGER.warning("Microsoft Graph network request failed: %s", exc.__class__.__name__)
+        LOGGER.exception("Microsoft Graph network request failed for %s.", _safe_graph_url(url))
         raise RuntimeError("Network failure while contacting Microsoft Graph.") from exc
+    LOGGER.info("Microsoft Graph response status=%s url=%s", response.status_code, _safe_graph_url(url))
+    LOGGER.info("Microsoft Graph response body=%s", _safe_response_text(response))
+    graph_error = _graph_error_details(response)
     if response.status_code == 401 and retry_on_unauthorized:
-        renewed_token = graph_auth.acquire_token_silent_once(force_refresh=True, clear_on_failure=True)
+        LOGGER.warning(
+            "Microsoft Graph returned 401 code=%s message=%s; attempting silent token renewal once.",
+            graph_error["code"],
+            graph_error["message"],
+        )
+        renewed_token = graph_auth.acquire_token_silent_once(force_refresh=True)
         if renewed_token:
             return _graph_get(url, renewed_token, retry_on_unauthorized=False)
+        LOGGER.warning("Microsoft Graph 401 silent renewal did not return an access token.")
     if response.status_code == 401:
-        graph_auth.logout_user()
-        raise RuntimeError("Your Microsoft session expired. Sign in again.")
+        raise GraphApiError(response.status_code, graph_error["code"], graph_error["message"])
     if response.status_code == 403:
-        raise RuntimeError("Microsoft Graph permission denied. Mail.Read or admin consent may be required.")
+        raise GraphApiError(response.status_code, graph_error["code"] or "Forbidden", graph_error["message"])
     if response.status_code == 404:
-        raise RuntimeError("Mailbox unavailable for this Microsoft account.")
+        raise GraphApiError(response.status_code, graph_error["code"] or "NotFound", graph_error["message"])
     if response.status_code >= 400:
-        try:
-            error = response.json().get("error", {})
-            details = str(error.get("message") or error.get("code") or response.reason)
-        except ValueError:
-            details = response.reason
-        LOGGER.warning("Microsoft Graph returned HTTP %s: %s", response.status_code, details)
-        raise RuntimeError(_friendly_graph_error(response.status_code, details))
+        LOGGER.warning(
+            "Microsoft Graph returned HTTP %s code=%s message=%s",
+            response.status_code,
+            graph_error["code"],
+            graph_error["message"],
+            stack_info=True,
+        )
+        raise GraphApiError(response.status_code, graph_error["code"], graph_error["message"])
     return response.json()
+
+
+def _graph_error_details(response: requests.Response) -> dict[str, str]:
+    """Return sanitized Microsoft Graph error code and message."""
+    code = ""
+    message = ""
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = {}
+    if isinstance(payload, dict):
+        error = payload.get("error") or {}
+        if isinstance(error, dict):
+            code = str(error.get("code") or "")
+            message = str(error.get("message") or "")
+    return {
+        "code": _sanitize_graph_error(code),
+        "message": _sanitize_graph_error(message or response.reason or ""),
+    }
+
+
+def _friendly_unauthorized_error(graph_error: dict[str, str]) -> str:
+    """Return a safe 401 diagnostic without clearing persisted auth."""
+    code = graph_error.get("code") or "Unauthorized"
+    message = graph_error.get("message") or "Microsoft Graph rejected the access token."
+    return f"Microsoft Graph 401: {code}. {message}"
+
+
+def _safe_graph_url(url: str) -> str:
+    """Remove query secrets from a Graph URL before logging."""
+    return _sanitize_graph_error(url)
+
+
+def _safe_response_text(response: requests.Response) -> str:
+    """Return a sanitized response body for diagnostics."""
+    text = getattr(response, "text", "")
+    if text:
+        return _sanitize_graph_error(text)
+    try:
+        return _sanitize_graph_error(str(response.json()))
+    except ValueError:
+        return ""
+
+
+def _sanitize_graph_error(value: str) -> str:
+    """Remove OAuth secrets and token-shaped strings from Graph diagnostics."""
+    sanitized = str(value)
+    keyed_patterns = (
+        r"(?i)(client_secret=)[^&\s]+",
+        r"(?i)(access_token['\"]?\s*[:=]\s*['\"]?)[^'\"\s,}]+",
+        r"(?i)(refresh_token['\"]?\s*[:=]\s*['\"]?)[^'\"\s,}]+",
+        r"(?i)(authorization_code['\"]?\s*[:=]\s*['\"]?)[^'\"\s,}]+",
+        r"(?i)(code=)[^&\s]+",
+    )
+    for pattern in keyed_patterns:
+        sanitized = re.sub(pattern, r"\1[redacted]", sanitized)
+    sanitized = re.sub(r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*", "[redacted-token]", sanitized)
+    return sanitized[:1000]
 
 
 def _friendly_graph_error(status_code: int, details: str) -> str:
@@ -157,6 +238,5 @@ def _friendly_graph_error(status_code: int, details: str) -> str:
     if "consent" in lower:
         return "Microsoft Graph permissions need administrator approval."
     if "token" in lower or "expired" in lower:
-        graph_auth.logout_user()
         return "Your Microsoft session expired. Please sign in again."
     return f"Microsoft Graph API failure ({status_code}). Please try again."
