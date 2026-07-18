@@ -143,12 +143,17 @@ def _graph_get(url: str, token: str, retry_on_unauthorized: bool = True) -> dict
     LOGGER.info("Microsoft Graph response body=%s", _safe_response_text(response))
     graph_error = _graph_error_details(response)
     if response.status_code == 401 and retry_on_unauthorized:
+        LOGGER.warning(
+            "Microsoft Graph returned 401 code=%s message=%s; attempting silent token renewal once.",
+            graph_error["code"],
+            graph_error["message"],
+        )
         renewed_token = graph_auth.acquire_token_silent_once(force_refresh=True)
         if renewed_token:
             return _graph_get(url, renewed_token, retry_on_unauthorized=False)
         LOGGER.warning("Microsoft Graph 401 silent renewal did not return an access token.")
     if response.status_code == 401:
-        raise RuntimeError("Your Microsoft session expired. Sign in again.")
+        raise GraphApiError(response.status_code, graph_error["code"], graph_error["message"])
     if response.status_code == 403:
         raise GraphApiError(response.status_code, graph_error["code"] or "Forbidden", graph_error["message"])
     if response.status_code == 404:
