@@ -2,11 +2,24 @@
 
 from __future__ import annotations
 
+import base64
+import json
 from typing import Any
 
 import pytest
 
 from services import graph_auth, graph_client
+
+
+def _unsigned_jwt(claims: dict[str, Any]) -> str:
+    """Build an unsigned JWT-shaped token for diagnostics tests."""
+    header = {"alg": "none", "typ": "JWT"}
+
+    def encode(data: dict[str, Any]) -> str:
+        payload = json.dumps(data, separators=(",", ":")).encode("utf-8")
+        return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+    return f"{encode(header)}.{encode(claims)}."
 
 
 class FakeResponse:
@@ -102,3 +115,77 @@ def test_graph_get_sends_exact_bearer_authorization_header(monkeypatch) -> None:
         "No - current session token used; silent acquisition skipped because session token was usable"
     )
     assert "latest-token" not in str(diagnostics)
+
+
+def test_graph_request_diagnostics_decode_safe_access_token_claims(monkeypatch) -> None:
+    """The token sent to Graph should expose safe claims without exposing the JWT."""
+    token = _unsigned_jwt(
+        {
+            "aud": "https://graph.microsoft.com",
+            "iss": "https://sts.windows.net/tenant-id/",
+            "tid": "tenant-id",
+            "oid": "object-id",
+            "azp": "client-id",
+            "scp": "User.Read Mail.Read",
+            "ver": "2.0",
+            "exp": 4102444800,
+            "iat": 1700000000,
+        }
+    )
+    monkeypatch.setattr(graph_auth, "auth_diagnostics", lambda: {"silent_token_result": "access_token"})
+    monkeypatch.setitem(graph_auth.st.session_state, graph_auth.TOKEN_STATE_KEY, {"access_token": token})
+
+    diagnostics = graph_client._graph_request_diagnostics(
+        "GET",
+        "https://graph.microsoft.com/v1.0/me",
+        token,
+        graph_client._headers(token),
+    )
+
+    assert diagnostics["Token Claim aud"] == "https://graph.microsoft.com"
+    assert diagnostics["Token Claim iss"] == "https://sts.windows.net/tenant-id/"
+    assert diagnostics["Token Claim tid"] == "tenant-id"
+    assert diagnostics["Token Claim oid"] == "object-id"
+    assert diagnostics["Token Claim appid"] == ""
+    assert diagnostics["Token Claim azp"] == "client-id"
+    assert diagnostics["Token Claim scp"] == "User.Read Mail.Read"
+    assert diagnostics["Token Claim roles"] == ""
+    assert diagnostics["Token Claim ver"] == "2.0"
+    assert diagnostics["Token Claim exp"] == "4102444800"
+    assert diagnostics["Token Claim iat"] == "1700000000"
+    assert diagnostics["Is Access Token"] == "Yes"
+    assert diagnostics["Is ID Token"] == "No"
+    assert diagnostics["Audience Equals Graph URL"] == "Yes"
+    assert diagnostics["Contains Mail.Read Scope"] == "Yes"
+    assert diagnostics["Token Delegation Type"] == "Delegated"
+    assert token not in str(diagnostics)
+
+
+def test_graph_request_diagnostics_identify_id_token(monkeypatch) -> None:
+    """A token with the app client id as audience should be marked as an ID token."""
+    monkeypatch.setattr(graph_client.config, "CLIENT_ID", "client-id")
+    monkeypatch.setattr(graph_auth, "auth_diagnostics", lambda: {"silent_token_result": "not_run"})
+    token = _unsigned_jwt(
+        {
+            "aud": "client-id",
+            "iss": "https://login.microsoftonline.com/tenant-id/v2.0",
+            "tid": "tenant-id",
+            "oid": "object-id",
+            "ver": "2.0",
+            "exp": 4102444800,
+            "iat": 1700000000,
+        }
+    )
+
+    diagnostics = graph_client._graph_request_diagnostics(
+        "GET",
+        "https://graph.microsoft.com/v1.0/me",
+        token,
+        graph_client._headers(token),
+    )
+
+    assert diagnostics["Is Access Token"] == "No"
+    assert diagnostics["Is ID Token"] == "Yes"
+    assert diagnostics["Audience Equals Graph URL"] == "No"
+    assert diagnostics["Contains Mail.Read Scope"] == "No"
+    assert diagnostics["Token Delegation Type"] == "Unknown"

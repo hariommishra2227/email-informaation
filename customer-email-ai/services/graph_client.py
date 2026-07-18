@@ -273,7 +273,7 @@ def _graph_request_diagnostics(method: str, url: str, token: str, headers: dict[
     """Build safe request diagnostics before sending a Graph request."""
     authorization = str(headers.get("Authorization") or "")
     token_status = _session_token_status(token)
-    return {
+    diagnostics = {
         "Request URL": _safe_graph_url(url),
         "HTTP Method": method,
         "Authorization Header Present": "Yes" if authorization else "No",
@@ -288,6 +288,8 @@ def _graph_request_diagnostics(method: str, url: str, token: str, headers: dict[
         "Response Headers": "",
         "Response Body": "",
     }
+    diagnostics.update(_access_token_claim_diagnostics(token))
+    return diagnostics
 
 
 def _graph_response_diagnostics(
@@ -368,6 +370,56 @@ def _decode_jwt_payload(token: str) -> dict[str, Any]:
         return json.loads(base64.urlsafe_b64decode(payload.encode("utf-8")).decode("utf-8"))
     except (ValueError, json.JSONDecodeError):
         return {}
+
+
+def _access_token_claim_diagnostics(token: str) -> dict[str, str]:
+    """Return safe decoded access-token claims and token-shape diagnostics."""
+    claims = _decode_jwt_payload(token)
+    safe_claims = {
+        claim_name: _format_claim_value(claims.get(claim_name))
+        for claim_name in ("aud", "iss", "tid", "oid", "appid", "azp", "scp", "roles", "ver", "exp", "iat")
+    }
+    scopes = set(str(claims.get("scp") or "").split())
+    roles = claims.get("roles")
+    has_roles = bool(roles)
+    audience = str(claims.get("aud") or "")
+    has_delegated_scopes = bool(scopes)
+    is_graph_audience = audience == "https://graph.microsoft.com"
+    is_graph_app_id_audience = audience == "00000003-0000-0000-c000-000000000000"
+    is_id_token = bool(audience and audience == str(config.CLIENT_ID or ""))
+    is_access_token = bool(audience and (has_delegated_scopes or has_roles) and not is_id_token)
+    if has_delegated_scopes:
+        token_type = "Delegated"
+    elif has_roles:
+        token_type = "Application"
+    else:
+        token_type = "Unknown"
+    diagnostics = {
+        f"Token Claim {claim_name}": claim_value
+        for claim_name, claim_value in safe_claims.items()
+    }
+    diagnostics.update(
+        {
+            "Is Access Token": "Yes" if is_access_token else "No",
+            "Is ID Token": "Yes" if is_id_token else "No",
+            "Audience Equals Graph URL": "Yes" if is_graph_audience else "No",
+            "Audience Is Accepted Graph Resource": "Yes" if is_graph_audience or is_graph_app_id_audience else "No",
+            "Contains Mail.Read Scope": "Yes" if any(scope.lower() == "mail.read" for scope in scopes) else "No",
+            "Token Delegation Type": token_type,
+        }
+    )
+    return diagnostics
+
+
+def _format_claim_value(value: Any) -> str:
+    """Format one safe JWT claim value for diagnostics."""
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        return ", ".join(_sanitize_graph_error(str(item)) for item in value)
+    if isinstance(value, dict):
+        return _sanitize_graph_error(json.dumps(value, sort_keys=True))
+    return _sanitize_graph_error(str(value))
 
 
 def _sanitize_graph_error(value: str) -> str:

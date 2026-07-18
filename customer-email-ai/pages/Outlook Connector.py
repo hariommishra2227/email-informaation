@@ -577,6 +577,22 @@ def _format_graph_request_diagnostic(diagnostics: dict[str, str]) -> str:
         "Graph Error Message": diagnostics.get("Graph Error Message", ""),
         "Response Headers": diagnostics.get("Response Headers", ""),
         "Response Body": diagnostics.get("Response Body", ""),
+        "aud": diagnostics.get("Token Claim aud", ""),
+        "iss": diagnostics.get("Token Claim iss", ""),
+        "tid": diagnostics.get("Token Claim tid", ""),
+        "oid": diagnostics.get("Token Claim oid", ""),
+        "appid": diagnostics.get("Token Claim appid", ""),
+        "azp": diagnostics.get("Token Claim azp", ""),
+        "scp": diagnostics.get("Token Claim scp", ""),
+        "roles": diagnostics.get("Token Claim roles", ""),
+        "ver": diagnostics.get("Token Claim ver", ""),
+        "exp": diagnostics.get("Token Claim exp", ""),
+        "iat": diagnostics.get("Token Claim iat", ""),
+        "Is this an access token": diagnostics.get("Is Access Token", ""),
+        "Is this an ID token": diagnostics.get("Is ID Token", ""),
+        "Does aud equal https://graph.microsoft.com": diagnostics.get("Audience Equals Graph URL", ""),
+        "Does the token contain Mail.Read in scp": diagnostics.get("Contains Mail.Read Scope", ""),
+        "Is the token delegated or application": diagnostics.get("Token Delegation Type", ""),
     }
     lines = ["Graph Request", "-------------"]
     for label, value in rows.items():

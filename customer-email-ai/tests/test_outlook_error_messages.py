@@ -88,6 +88,24 @@ def test_graph_401_shows_safe_authenticate_header(monkeypatch) -> None:
             'error_description="Token eyJabc.def.ghi was rejected", '
             'refresh_token="secret-refresh-token"'
         ),
+        diagnostics={
+            "Token Claim aud": "https://graph.microsoft.com",
+            "Token Claim iss": "https://sts.windows.net/tenant-id/",
+            "Token Claim tid": "tenant-id",
+            "Token Claim oid": "object-id",
+            "Token Claim appid": "",
+            "Token Claim azp": "client-id",
+            "Token Claim scp": "User.Read Mail.Read",
+            "Token Claim roles": "",
+            "Token Claim ver": "2.0",
+            "Token Claim exp": "4102444800",
+            "Token Claim iat": "1700000000",
+            "Is Access Token": "Yes",
+            "Is ID Token": "No",
+            "Audience Equals Graph URL": "Yes",
+            "Contains Mail.Read Scope": "Yes",
+            "Token Delegation Type": "Delegated",
+        },
     )
 
     message = page._friendly_exception_message(exc)
@@ -96,6 +114,17 @@ def test_graph_401_shows_safe_authenticate_header(monkeypatch) -> None:
     assert "Token audience: https://graph.microsoft.com" in message
     assert "WWW-Authenticate:" in message
     assert "Graph Request" in message
+    assert "aud: https://graph.microsoft.com" in message
+    assert "iss: https://sts.windows.net/tenant-id/" in message
+    assert "tid: tenant-id" in message
+    assert "oid: object-id" in message
+    assert "azp: client-id" in message
+    assert "scp: User.Read Mail.Read" in message
+    assert "Is this an access token: Yes" in message
+    assert "Is this an ID token: No" in message
+    assert "Does aud equal https://graph.microsoft.com: Yes" in message
+    assert "Does the token contain Mail.Read in scp: Yes" in message
+    assert "Is the token delegated or application: Delegated" in message
     assert "[redacted-token]" in message
     assert "secret-refresh-token" not in message
 
