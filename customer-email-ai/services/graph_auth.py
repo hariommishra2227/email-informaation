@@ -5,8 +5,8 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import secrets
 import time
-import uuid
 from typing import Any
 
 try:
@@ -17,6 +17,7 @@ except ImportError:  # pragma: no cover
 import streamlit as st
 
 import config
+from storage import database
 
 
 LOGGER = logging.getLogger(__name__)
@@ -26,6 +27,7 @@ USER_STATE_KEY = "outlook_connected_user"
 AUTH_STATE_KEY = "outlook_auth_state"
 AUTH_ERROR_STATE_KEY = "outlook_auth_error"
 REQUIRED_MAIL_SCOPE = "Mail.Read"
+AUTH_FLOW_TTL_SECONDS = 600
 
 
 def _build_msal_app():
@@ -46,15 +48,33 @@ def create_login_url() -> str:
     missing = config.missing_live_settings()
     if missing:
         raise RuntimeError(f"Live Outlook configuration is missing: {', '.join(missing)}")
-    state = uuid.uuid4().hex
-    st.session_state[AUTH_STATE_KEY] = state
+
+    _clear_callback_query_params()
+    now = int(time.time())
+    database.delete_expired_oauth_auth_flows(now)
+    st.session_state.pop(AUTH_ERROR_STATE_KEY, None)
+
+    flow_id = secrets.token_urlsafe(32)
     app = _build_msal_app()
-    return app.get_authorization_request_url(
+    flow = app.initiate_auth_code_flow(
         scopes=config.GRAPH_SCOPES,
         redirect_uri=config.REDIRECT_URI,
-        state=state,
+        state=flow_id,
         prompt="select_account",
     )
+    auth_uri = str(flow.get("auth_uri") or "")
+    if not auth_uri:
+        raise RuntimeError("Microsoft login URL could not be created.")
+
+    flow_id = str(flow.get("state") or flow_id)
+    database.store_oauth_auth_flow(
+        flow_id=flow_id,
+        flow=flow,
+        created_at=now,
+        expires_at=now + AUTH_FLOW_TTL_SECONDS,
+    )
+    st.session_state[AUTH_STATE_KEY] = flow_id
+    return auth_uri
 
 
 def acquire_token_by_authorization_code(code: str) -> dict[str, Any]:
@@ -76,34 +96,67 @@ def acquire_token_by_authorization_code(code: str) -> dict[str, Any]:
     return result
 
 
+def acquire_token_by_auth_code_flow(flow: dict[str, Any], callback_params: dict[str, Any]) -> dict[str, Any]:
+    """Exchange a Microsoft callback through MSAL's saved auth-code flow."""
+    if config.is_mock_mode():
+        return {"access_token": "mock-access-token", "account": {"username": config.APP_USER_EMAIL}}
+    result = _build_msal_app().acquire_token_by_auth_code_flow(flow, callback_params)
+    if "access_token" not in result:
+        raise RuntimeError(_format_token_error(result))
+    _store_token_result(result)
+    if not has_granted_scope(REQUIRED_MAIL_SCOPE, result):
+        granted = ", ".join(granted_scopes(result)) or "none"
+        raise RuntimeError(f"Microsoft token did not include {REQUIRED_MAIL_SCOPE}. Granted scopes: {granted}.")
+    return result
+
+
 def handle_auth_callback() -> bool:
     """Handle the OAuth callback query parameters from Microsoft."""
     if config.is_mock_mode():
         return True
 
-    params = st.query_params
+    params = dict(st.query_params)
     if "error" in params:
+        flow_id = str(params.get("state") or "")
+        if flow_id:
+            database.delete_oauth_auth_flow(flow_id)
         st.session_state[AUTH_ERROR_STATE_KEY] = _format_query_error(params)
+        st.session_state.pop(AUTH_STATE_KEY, None)
+        _clear_callback_query_params()
         return False
     code = params.get("code")
     if not code:
         return has_valid_access_token()
 
-    expected_state = st.session_state.get(AUTH_STATE_KEY)
-    received_state = params.get("state")
-    if not expected_state or not received_state or expected_state != received_state:
-        st.session_state[AUTH_ERROR_STATE_KEY] = "Microsoft sign-in state did not match. Please try again."
-        st.query_params.clear()
+    flow_id = str(params.get("state") or "")
+    if not flow_id:
+        st.session_state[AUTH_ERROR_STATE_KEY] = "Microsoft sign-in did not include a state value. Please connect Outlook again."
+        st.session_state.pop(AUTH_STATE_KEY, None)
+        _clear_callback_query_params()
+        return False
+
+    status, flow = database.consume_oauth_auth_flow(flow_id, now=int(time.time()))
+    if status == "missing":
+        st.session_state[AUTH_ERROR_STATE_KEY] = "Microsoft sign-in flow was not found or was already used. Please connect Outlook again."
+        st.session_state.pop(AUTH_STATE_KEY, None)
+        _clear_callback_query_params()
+        return False
+    if status == "expired":
+        st.session_state[AUTH_ERROR_STATE_KEY] = "Microsoft sign-in flow expired. Please connect Outlook again."
+        st.session_state.pop(AUTH_STATE_KEY, None)
+        _clear_callback_query_params()
         return False
 
     try:
-        acquire_token_by_authorization_code(str(code))
+        acquire_token_by_auth_code_flow(flow or {}, params)
         st.session_state.pop(AUTH_STATE_KEY, None)
-        st.query_params.clear()
+        _clear_callback_query_params()
         st.session_state.pop(AUTH_ERROR_STATE_KEY, None)
         return True
     except Exception as exc:
         st.session_state[AUTH_ERROR_STATE_KEY] = str(exc)
+        st.session_state.pop(AUTH_STATE_KEY, None)
+        _clear_callback_query_params()
         return False
 
 
@@ -227,6 +280,13 @@ def _format_query_error(params: Any) -> str:
     error = str(params.get("error") or "authorization_error")
     description = str(params.get("error_description") or "Microsoft sign-in failed.")
     return f"Microsoft sign-in error: {error}. {description}"
+
+
+def _clear_callback_query_params() -> None:
+    """Clear OAuth callback parameters from the visible Streamlit URL."""
+    params = st.query_params
+    if any(key in params for key in ("code", "state", "error", "error_description")):
+        params.clear()
 
 
 def _decode_jwt_payload(access_token: str) -> dict[str, Any]:

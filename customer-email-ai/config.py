@@ -83,7 +83,7 @@ AZURE_CLIENT_ID = _secret_value("AZURE_CLIENT_ID", "").strip()
 AZURE_CLIENT_SECRET = _secret_value("AZURE_CLIENT_SECRET", "").strip()
 AZURE_REDIRECT_URI = _secret_value(
     "AZURE_REDIRECT_URI",
-    "http://localhost:8501",
+    "https://email-informaation-frmrxrcergpwxbvh5lcqux.streamlit.app/Outlook_Connector",
 ).strip()
 AZURE_AUTHORITY = _secret_value(
     "AZURE_AUTHORITY",

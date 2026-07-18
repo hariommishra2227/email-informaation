@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import json
 import sqlite3
 from collections.abc import Iterable
 from contextlib import contextmanager
@@ -137,8 +138,29 @@ def _initialize_database(db_path: Path | str | None = None) -> None:
                 details TEXT,
                 created_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS oauth_auth_flows (
+                flow_id TEXT PRIMARY KEY,
+                flow_json TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL
+            );
             """
         )
+
+
+def _ensure_oauth_auth_flows_table(connection: sqlite3.Connection) -> None:
+    """Create the pending OAuth flow table if database initialization has not run yet."""
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS oauth_auth_flows (
+            flow_id TEXT PRIMARY KEY,
+            flow_json TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL
+        )
+        """
+    )
 
 
 def _can_recover_database(db_path: Path | str | None, exc: sqlite3.DatabaseError) -> bool:
@@ -182,6 +204,58 @@ def ensure_user(user_id: str, email: str | None = None, display_name: str | None
             """,
             (user_id, email or user_id, display_name or user_id, utc_now()),
         )
+
+
+def store_oauth_auth_flow(flow_id: str, flow: dict[str, Any], created_at: int, expires_at: int) -> None:
+    """Persist one pending MSAL auth-code flow server-side."""
+    with get_connection() as connection:
+        _ensure_oauth_auth_flows_table(connection)
+        connection.execute(
+            """
+            INSERT OR REPLACE INTO oauth_auth_flows (flow_id, flow_json, created_at, expires_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (flow_id, json.dumps(flow), int(created_at), int(expires_at)),
+        )
+
+
+def consume_oauth_auth_flow(flow_id: str, now: int) -> tuple[str, dict[str, Any] | None]:
+    """Return and delete a pending MSAL flow, reporting missing or expired state."""
+    with get_connection() as connection:
+        _ensure_oauth_auth_flows_table(connection)
+        row = connection.execute(
+            """
+            SELECT flow_json, expires_at FROM oauth_auth_flows
+            WHERE flow_id = ?
+            """,
+            (flow_id,),
+        ).fetchone()
+        if row is None:
+            return "missing", None
+
+        connection.execute("DELETE FROM oauth_auth_flows WHERE flow_id = ?", (flow_id,))
+        if int(row["expires_at"]) < int(now):
+            return "expired", None
+
+        try:
+            flow = json.loads(str(row["flow_json"]))
+        except json.JSONDecodeError:
+            return "missing", None
+        return ("ok", flow) if isinstance(flow, dict) else ("missing", None)
+
+
+def delete_oauth_auth_flow(flow_id: str) -> None:
+    """Delete one pending OAuth flow if it exists."""
+    with get_connection() as connection:
+        _ensure_oauth_auth_flows_table(connection)
+        connection.execute("DELETE FROM oauth_auth_flows WHERE flow_id = ?", (flow_id,))
+
+
+def delete_expired_oauth_auth_flows(now: int) -> None:
+    """Remove expired OAuth auth-code flows."""
+    with get_connection() as connection:
+        _ensure_oauth_auth_flows_table(connection)
+        connection.execute("DELETE FROM oauth_auth_flows WHERE expires_at < ?", (int(now),))
 
 
 def upsert_outlook_message(message: OutlookMessage, status: str = "Pending") -> None:
