@@ -138,7 +138,8 @@ def _render_connection_panel() -> bool:
             LOGGER.exception("Microsoft authorization callback failed.")
             st.error(_safe_auth_exception_message(exc))
 
-    status_label = "Demo Mode" if config.is_mock_mode() else ("Connected" if graph_auth.is_connected() else "Outlook not connected")
+    is_connected = config.is_mock_mode() or graph_auth.is_connected()
+    status_label = "Demo Mode" if config.is_mock_mode() else ("Connected" if is_connected else "Outlook not connected")
     mode_label = "Demo Mode" if config.is_mock_mode() else "Real Mode"
     account = "Demo account" if config.is_mock_mode() else "Not connected"
 
@@ -166,7 +167,7 @@ def _render_connection_panel() -> bool:
     with status_cols[3]:
         if config.is_mock_mode() or login_disabled:
             st.button(config.OUTLOOK_SIGN_IN_LABEL, disabled=True, use_container_width=True)
-        elif not graph_auth.is_connected():
+        elif not is_connected:
             try:
                 authorization_url = graph_auth.get_authorization_url()
                 st.link_button(
@@ -208,7 +209,7 @@ def _render_connection_panel() -> bool:
         st.warning("Outlook sign-in is not configured yet.")
         return False
 
-    if not graph_auth.is_connected():
+    if not is_connected:
         return False
 
     try:
@@ -245,6 +246,18 @@ def _render_safe_diagnostics() -> None:
         "Token exists": "Yes" if graph_auth.token_exists() else "No",
         "Granted scopes": ", ".join(graph_auth.granted_scopes()) or "None",
     }
+    if not config.is_mock_mode():
+        diagnostics = graph_auth.auth_diagnostics()
+        rows.update(
+            {
+                "Persisted cache exists": diagnostics.get("persisted_cache_exists", "No"),
+                "Accounts found in cache": diagnostics.get("accounts_found", "0"),
+                "Silent token result": diagnostics.get("silent_token_result", "not_run"),
+                "Cache saved after callback": diagnostics.get("cache_saved_after_callback", "No"),
+                "Token cache owner": diagnostics.get("cache_owner", "unknown"),
+                "Stored account metadata": diagnostics.get("stored_account", "No"),
+            }
+        )
     with st.expander("Outlook diagnostics", expanded=False):
         for label, value in rows.items():
             st.write(f"**{label}:** {value}")

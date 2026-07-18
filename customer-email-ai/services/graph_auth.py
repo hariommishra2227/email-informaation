@@ -26,6 +26,8 @@ ACCOUNT_STATE_KEY = "outlook_account"
 USER_STATE_KEY = "outlook_connected_user"
 AUTH_STATE_KEY = "outlook_auth_state"
 AUTH_ERROR_STATE_KEY = "outlook_auth_error"
+CALLBACK_CACHE_SAVED_STATE_KEY = "outlook_callback_cache_saved"
+SILENT_RESULT_STATE_KEY = "outlook_silent_token_result"
 REQUIRED_MAIL_SCOPE = "Mail.Read"
 SILENT_TOKEN_SCOPES = ["User.Read", "Mail.Read"]
 AUTH_FLOW_TTL_SECONDS = 600
@@ -102,7 +104,9 @@ def acquire_token_by_authorization_code(code: str) -> dict[str, Any]:
     if "access_token" not in result:
         raise RuntimeError(_format_token_error(result))
     _store_token_result(result)
-    _persist_msal_token_cache(token_cache, _account_from_result_or_cache(result, app, stored_account))
+    _remember_callback_cache_saved(
+        _persist_msal_token_cache(token_cache, _account_from_result_or_cache(result, app, stored_account))
+    )
     if not has_granted_scope(REQUIRED_MAIL_SCOPE, result):
         granted = ", ".join(granted_scopes(result)) or "none"
         raise RuntimeError(f"Microsoft token did not include {REQUIRED_MAIL_SCOPE}. Granted scopes: {granted}.")
@@ -119,7 +123,9 @@ def acquire_token_by_auth_code_flow(flow: dict[str, Any], callback_params: dict[
     if "access_token" not in result:
         raise RuntimeError(_format_token_error(result))
     _store_token_result(result)
-    _persist_msal_token_cache(token_cache, _account_from_result_or_cache(result, app, stored_account))
+    _remember_callback_cache_saved(
+        _persist_msal_token_cache(token_cache, _account_from_result_or_cache(result, app, stored_account))
+    )
     if not has_granted_scope(REQUIRED_MAIL_SCOPE, result):
         granted = ", ".join(granted_scopes(result)) or "none"
         raise RuntimeError(f"Microsoft token did not include {REQUIRED_MAIL_SCOPE}. Granted scopes: {granted}.")
@@ -142,7 +148,7 @@ def handle_auth_callback() -> bool:
         return False
     code = params.get("code")
     if not code:
-        return has_valid_access_token()
+        return is_connected()
 
     flow_id = str(params.get("state") or "")
     if not flow_id:
@@ -181,11 +187,10 @@ def get_valid_access_token() -> str:
     """Return a non-expired access token, renewing through MSAL when needed."""
     if config.is_mock_mode():
         return "mock-access-token"
-    silent_token = acquire_token_silent_once(force_refresh=False, clear_on_failure=True)
+    silent_token = acquire_token_silent_once(force_refresh=False)
     if silent_token:
         return silent_token
 
-    logout_user()
     raise RuntimeError("Your Microsoft session expired. Sign in again.")
 
 
@@ -197,8 +202,7 @@ def acquire_token_silent_once(force_refresh: bool = False, clear_on_failure: boo
     app = _build_msal_app(token_cache)
     account = _select_account(app, stored_account)
     if not account:
-        if clear_on_failure:
-            _clear_persisted_auth()
+        _remember_silent_token_result("no_account")
         return None
 
     result = _acquire_token_silent(app, account, SILENT_TOKEN_SCOPES, force_refresh=force_refresh)
@@ -206,16 +210,18 @@ def acquire_token_silent_once(force_refresh: bool = False, clear_on_failure: boo
     if result and "access_token" in result:
         _store_token_result(result)
         _persist_msal_token_cache(token_cache, _account_from_result_or_cache(result, app, account))
+        _remember_silent_token_result("access_token")
         return str(result["access_token"])
 
     if result and ("error" in result or "error_description" in result):
         st.session_state[AUTH_ERROR_STATE_KEY] = _format_token_error(result)
-    if clear_on_failure:
-        _clear_persisted_auth()
+        _remember_silent_token_result(str(result.get("error") or "token_error"))
+    else:
+        _remember_silent_token_result("no_result")
     return None
 
 
-def logout_user() -> None:
+def logout_user(clear_persisted: bool = True) -> None:
     """Disconnect Outlook by removing account and token data from session state."""
     st.session_state[TOKEN_STATE_KEY] = {}
     st.session_state[ACCOUNT_STATE_KEY] = {}
@@ -226,7 +232,9 @@ def logout_user() -> None:
     st.session_state["selected_outlook_messages"] = []
     st.session_state["outlook_selected_messages"] = []
     st.session_state["outlook_import_summary"] = None
-    _clear_persisted_auth()
+    st.session_state[SILENT_RESULT_STATE_KEY] = ""
+    if clear_persisted:
+        _clear_persisted_auth()
 
 
 def is_connected() -> bool:
@@ -315,6 +323,47 @@ def auth_error() -> str:
     return str(st.session_state.get(AUTH_ERROR_STATE_KEY, ""))
 
 
+def auth_diagnostics() -> dict[str, str]:
+    """Return safe Outlook auth diagnostics without exposing token material."""
+    if config.is_mock_mode():
+        return {
+            "persisted_cache_exists": "No",
+            "accounts_found": "0",
+            "silent_token_result": "mock",
+            "cache_saved_after_callback": "No",
+        }
+    try:
+        cache_json, stored_account = database.load_oauth_token_cache(_token_cache_owner())
+    except Exception:
+        return {
+            "persisted_cache_exists": "Unknown",
+            "accounts_found": "0",
+            "silent_token_result": "database_error",
+            "cache_saved_after_callback": "Yes" if _session_state_get(CALLBACK_CACHE_SAVED_STATE_KEY) else "No",
+            "cache_owner": _token_cache_owner(),
+            "stored_account": "Unknown",
+        }
+    accounts_count = 0
+    try:
+        token_cache = _new_msal_token_cache()
+        if token_cache is not None and cache_json:
+            token_cache.deserialize(cache_json)
+        app = _build_msal_app(token_cache)
+        accounts_count = len(_get_accounts(app))
+    except Exception as exc:
+        st.session_state[AUTH_ERROR_STATE_KEY] = _format_token_error(
+            {"error": exc.__class__.__name__, "error_description": str(exc)}
+        )
+    return {
+        "persisted_cache_exists": "Yes" if cache_json else "No",
+        "accounts_found": str(accounts_count),
+        "silent_token_result": str(_session_state_get(SILENT_RESULT_STATE_KEY) or "not_run"),
+        "cache_saved_after_callback": "Yes" if _session_state_get(CALLBACK_CACHE_SAVED_STATE_KEY) else "No",
+        "cache_owner": _token_cache_owner(),
+        "stored_account": "Yes" if stored_account else "No",
+    }
+
+
 def _store_token_result(result: dict[str, Any]) -> None:
     """Store the current token result in session state only."""
     token_result = dict(result)
@@ -347,18 +396,37 @@ def _load_msal_token_cache() -> tuple[Any | None, dict[str, Any] | None]:
     return token_cache, account
 
 
-def _persist_msal_token_cache(token_cache: Any | None, account: dict[str, Any] | None) -> None:
+def _persist_msal_token_cache(token_cache: Any | None, account: dict[str, Any] | None) -> bool:
     """Persist the MSAL token cache when it has changed."""
     if token_cache is None:
-        return
+        return False
     if not getattr(token_cache, "has_state_changed", False):
-        return
+        return False
     database.store_oauth_token_cache(
         cache_owner=_token_cache_owner(),
         cache_json=str(token_cache.serialize()),
         account=_safe_account_metadata(account or {}),
         updated_at=int(time.time()),
     )
+    return True
+
+
+def _remember_callback_cache_saved(saved: bool) -> None:
+    """Remember whether the callback persisted the MSAL cache."""
+    st.session_state[CALLBACK_CACHE_SAVED_STATE_KEY] = bool(saved)
+
+
+def _remember_silent_token_result(status: str) -> None:
+    """Remember safe silent-acquisition status for diagnostics."""
+    st.session_state[SILENT_RESULT_STATE_KEY] = status
+
+
+def _session_state_get(key: str, default: Any = None) -> Any:
+    """Read Streamlit session state from dict-like or object-like test doubles."""
+    getter = getattr(st.session_state, "get", None)
+    if callable(getter):
+        return getter(key, default)
+    return getattr(st.session_state, key, default)
 
 
 def _clear_persisted_auth() -> None:
