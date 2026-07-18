@@ -239,7 +239,32 @@ def test_failed_auth_code_exchange_keeps_flow_until_success(monkeypatch) -> None
     assert status == "ok"
     assert flow and flow["state"] == state
     assert fake_st.session_state[graph_auth.AUTH_FLOW_STATE_KEY]["state"] == state
-    assert fake_st.query_params == {}
+    assert fake_st.query_params == {"code": "auth-code", "state": state}
+
+
+def test_failed_auth_code_exchange_is_not_retried_on_rerun(monkeypatch) -> None:
+    fake_st = FakeStreamlit()
+    app = FakeMsalApp(result={"error": "invalid_grant", "error_description": "Code already redeemed."})
+    _configure_live_auth(monkeypatch, fake_st, app=app)
+
+    graph_auth.create_login_url()
+    state = fake_st.session_state[graph_auth.AUTH_STATE_KEY]
+    fake_st.query_params.update({"code": "auth-code", "state": state})
+
+    assert not graph_auth.handle_auth_callback()
+    first_error = graph_auth.auth_error()
+    account = dict(app.accounts[0])
+    app.accounts = []
+    app.result = {
+        "access_token": "should-not-be-used",
+        "scope": "User.Read Mail.Read",
+        "expires_in": 3600,
+        "account": account,
+    }
+
+    assert not graph_auth.handle_auth_callback()
+    assert graph_auth.auth_error() == first_error
+    assert not graph_auth.token_exists()
 
 
 def test_auth_code_flow_missing_stored_flow(monkeypatch) -> None:

@@ -140,6 +140,13 @@ def _render_connection_panel() -> bool:
             st.error(_safe_auth_exception_message(exc))
 
     is_connected = config.is_mock_mode() or graph_auth.is_connected()
+    microsoft_configured = config.is_microsoft_configured()
+    can_start_login = (
+        not config.is_mock_mode()
+        and microsoft_configured
+        and not callback_in_progress
+        and not is_connected
+    )
     status_label = "Demo Mode" if config.is_mock_mode() else ("Connected" if is_connected else "Outlook not connected")
     mode_label = "Demo Mode" if config.is_mock_mode() else "Real Mode"
     account = "Demo account" if config.is_mock_mode() else "Not connected"
@@ -165,9 +172,7 @@ def _render_connection_panel() -> bool:
     with status_cols[2]:
         st.metric("Current mode", mode_label)
     with status_cols[3]:
-        if config.is_mock_mode() or login_disabled:
-            st.button(config.OUTLOOK_SIGN_IN_LABEL, disabled=True, use_container_width=True)
-        elif not is_connected:
+        if can_start_login:
             try:
                 authorization_url = graph_auth.get_authorization_url()
                 st.link_button(
@@ -181,8 +186,6 @@ def _render_connection_panel() -> bool:
                 LOGGER.exception("Could not create Microsoft login URL.")
                 st.error(_safe_auth_exception_message(exc))
                 _render_login_url_diagnostics(exc)
-        elif config.is_mock_mode() or not microsoft_configured or callback_in_progress:
-            st.button(config.OUTLOOK_SIGN_IN_LABEL, disabled=True, use_container_width=True)
         else:
             st.button(config.OUTLOOK_SIGN_IN_LABEL, disabled=True, use_container_width=True)
     with status_cols[4]:
