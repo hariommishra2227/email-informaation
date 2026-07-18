@@ -212,6 +212,14 @@ def handle_auth_callback() -> bool:
         _safe_code_debug(code),
     )
     if status == "missing":
+        if is_connected() or token_exists():
+            st.session_state[AUTH_ERROR_STATE_KEY] = ""
+            st.session_state[AUTH_STATE_KEY] = ""
+            st.session_state.pop(AUTH_FLOW_STATE_KEY, None)
+            st.session_state[AUTH_CODE_ATTEMPT_STATE_KEY] = ""
+            _clear_callback_query_params()
+            return True
+
         st.session_state[AUTH_ERROR_STATE_KEY] = "Microsoft sign-in flow was not found or was already used. Please connect Outlook again."
         return False
     if status == "expired":

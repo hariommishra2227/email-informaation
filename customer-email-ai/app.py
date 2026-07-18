@@ -771,6 +771,13 @@ def upgraded_main() -> None:
         initialize_outlook_session_state()
         render_styles()
 
+        if not app_config.is_mock_mode():
+            callback_params = dict(st.query_params)
+            if "code" in callback_params or "error" in callback_params:
+                callback_success = graph_auth.handle_auth_callback()
+                if callback_success:
+                    st.switch_page("pages/Outlook Connector.py")
+
         st.title("Dashboard")
         st.caption("Track Outlook emails, extracted customers and duplicate records.")
         if not app_config.is_mock_mode() and graph_auth.auth_error():
