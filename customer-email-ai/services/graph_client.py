@@ -388,7 +388,10 @@ def _session_account_value(key: str) -> str:
             account = graph_auth.connected_user() or {}
     except Exception:
         return ""
-    return _sanitize_graph_error(str(account.get(key) or ""))
+    value = str(account.get(key) or "")
+    if key == "home_account_id" and value:
+        return f"hash:{hashlib.sha256(value.encode('utf-8')).hexdigest()[:12]}"
+    return _sanitize_graph_error(value)
 
 
 def _session_access_token_hash() -> str:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import secrets
 from typing import Any
 
 import streamlit as st
@@ -46,11 +47,16 @@ def initialize_outlook_session_state() -> None:
         "outlook_connected_user": {},
         "outlook_auth_state": "",
         "outlook_auth_error": "",
+        "outlook_auth_session_id": "",
+        "outlook_token_cache_owner": "",
+        "outlook_account_home_account_id": "",
         "outlook_sign_in_label": config.OUTLOOK_SIGN_IN_LABEL,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = _new_session_default(value)
+    if not st.session_state.get("outlook_auth_session_id"):
+        st.session_state["outlook_auth_session_id"] = secrets.token_urlsafe(32)
 
 
 def _new_session_default(value: Any) -> Any:

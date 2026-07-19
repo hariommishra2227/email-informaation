@@ -121,7 +121,8 @@ def test_graph_get_sends_exact_bearer_authorization_header(monkeypatch) -> None:
     assert diagnostics["Bearer Prefix"] == "Yes"
     assert diagnostics["Token Length"] == str(len("latest-token"))
     assert diagnostics["Account Username"] == "user@example.com"
-    assert diagnostics["Account Home Account ID"] == "home-1"
+    assert diagnostics["Account Home Account ID"].startswith("hash:")
+    assert "home-1" not in diagnostics["Account Home Account ID"]
     assert diagnostics["Current Token Hash"] == diagnostics["Latest MSAL Token Hash"]
     assert diagnostics["Silent Token Used"] == (
         "No - current session token used; silent acquisition skipped because session token was usable"

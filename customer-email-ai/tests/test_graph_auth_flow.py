@@ -174,6 +174,20 @@ def _unsigned_jwt_with_claims(claims: dict[str, Any]) -> str:
     return f"{encode(header)}.{encode(claims)}."
 
 
+def _account_owner(home_account_id: str = "home-1") -> str:
+    """Return the expected per-account cache owner for tests."""
+    return graph_auth._permanent_cache_owner({"home_account_id": home_account_id})
+
+
+def _complete_sign_in(fake_st: FakeStreamlit) -> str:
+    """Complete a fake auth-code flow and return the persisted owner."""
+    graph_auth.create_login_url()
+    state = fake_st.session_state[graph_auth.AUTH_STATE_KEY]
+    fake_st.query_params.update({"code": "auth-code", "state": state})
+    assert graph_auth.handle_auth_callback()
+    return fake_st.session_state[graph_auth.TOKEN_CACHE_OWNER_STATE_KEY]
+
+
 def test_auth_code_flow_successful_state_match(monkeypatch) -> None:
     fake_st = FakeStreamlit()
     _configure_live_auth(monkeypatch, fake_st)
@@ -186,9 +200,14 @@ def test_auth_code_flow_successful_state_match(monkeypatch) -> None:
     assert graph_auth.token_exists()
     assert fake_st.query_params == {}
     assert fake_st.session_state[graph_auth.CALLBACK_CACHE_SAVED_STATE_KEY]
-    cache_json, account = database.load_oauth_token_cache(config.DEFAULT_USER_ID)
+    cache_owner = fake_st.session_state[graph_auth.TOKEN_CACHE_OWNER_STATE_KEY]
+    assert cache_owner == _account_owner()
+    cache_json, account = database.load_oauth_token_cache(cache_owner)
     assert cache_json
     assert account["home_account_id"] == "home-1"
+    assert account["tenant_id"] == "tenant-1"
+    legacy_json, _legacy_account = database.load_oauth_token_cache("default_user")
+    assert legacy_json == ""
 
 
 def test_auth_code_flow_mismatched_state(monkeypatch) -> None:
@@ -263,8 +282,11 @@ def test_missing_flow_with_valid_session_token_returns_success(monkeypatch) -> N
 def test_missing_flow_with_valid_persisted_cache_returns_success(monkeypatch) -> None:
     fake_st = FakeStreamlit()
     _configure_live_auth(monkeypatch, fake_st)
+    owner = _account_owner()
+    fake_st.session_state[graph_auth.TOKEN_CACHE_OWNER_STATE_KEY] = owner
+    fake_st.session_state[graph_auth.ACCOUNT_HOME_ID_STATE_KEY] = "home-1"
     database.store_oauth_token_cache(
-        config.DEFAULT_USER_ID,
+        owner,
         '{"cached": true}',
         {"home_account_id": "home-1", "username": "user@example.com"},
         123,
@@ -275,6 +297,22 @@ def test_missing_flow_with_valid_persisted_cache_returns_success(monkeypatch) ->
     assert graph_auth.auth_error() == ""
     assert fake_st.query_params == {}
     assert graph_auth.token_exists()
+
+
+def test_default_user_cache_is_never_loaded(monkeypatch) -> None:
+    fake_st = FakeStreamlit()
+    _configure_live_auth(monkeypatch, fake_st)
+    database.store_oauth_token_cache(
+        "default_user",
+        '{"legacy": true}',
+        {"home_account_id": "home-1", "username": "legacy@example.com"},
+        123,
+    )
+
+    assert graph_auth.acquire_token_silent_once() is None
+    assert not graph_auth.token_exists()
+    legacy_json, _account = database.load_oauth_token_cache("default_user")
+    assert legacy_json == ""
 
 
 def test_missing_flow_without_token_still_requires_reconnect(monkeypatch) -> None:
@@ -289,28 +327,30 @@ def test_missing_flow_without_token_still_requires_reconnect(monkeypatch) -> Non
     assert fake_st.query_params == {"code": "auth-code", "state": "missing-state"}
 
 
-def test_cache_restored_after_new_streamlit_session(monkeypatch) -> None:
+def test_two_streamlit_sessions_cannot_load_each_others_token_caches(monkeypatch) -> None:
     fake_st = FakeStreamlit()
     _configure_live_auth(monkeypatch, fake_st)
-    graph_auth.create_login_url()
-    state = fake_st.session_state[graph_auth.AUTH_STATE_KEY]
-    fake_st.query_params.update({"code": "auth-code", "state": state})
-    assert graph_auth.handle_auth_callback()
+    owner = _complete_sign_in(fake_st)
 
     new_fake_st = FakeStreamlit()
     monkeypatch.setattr(graph_auth, "st", new_fake_st)
 
-    assert graph_auth.get_valid_access_token()
-    assert graph_auth.is_graph_access_token()
-    assert graph_auth.token_exists()
-    assert new_fake_st.session_state[graph_auth.SILENT_RESULT_STATE_KEY] == "access_token"
+    assert graph_auth.acquire_token_silent_once() is None
+    assert not graph_auth.token_exists()
+    cache_json, _account = database.load_oauth_token_cache(owner)
+    assert cache_json
+    assert new_fake_st.session_state[graph_auth.SILENT_RESULT_STATE_KEY] == "no_cache_owner"
 
 
 def test_silent_token_renewal_force_refresh(monkeypatch) -> None:
     fake_st = FakeStreamlit()
     _configure_live_auth(monkeypatch, fake_st)
+    owner = _account_owner()
+    fake_st.session_state[graph_auth.TOKEN_CACHE_OWNER_STATE_KEY] = owner
+    fake_st.session_state[graph_auth.ACCOUNT_HOME_ID_STATE_KEY] = "home-1"
+    fake_st.session_state[graph_auth.ACCOUNT_STATE_KEY] = {"home_account_id": "home-1", "username": "user@example.com"}
     database.store_oauth_token_cache(
-        config.DEFAULT_USER_ID,
+        owner,
         '{"cached": true}',
         {"home_account_id": "home-1", "username": "user@example.com"},
         123,
@@ -325,14 +365,63 @@ def test_missing_or_expired_token_keeps_persisted_cache(monkeypatch) -> None:
     empty_app = FakeMsalApp()
     empty_app.accounts = []
     _configure_live_auth(monkeypatch, fake_st, app=empty_app)
+    owner = _account_owner("missing")
+    fake_st.session_state[graph_auth.TOKEN_CACHE_OWNER_STATE_KEY] = owner
+    fake_st.session_state[graph_auth.ACCOUNT_HOME_ID_STATE_KEY] = "missing"
     database.store_oauth_token_cache(
-        config.DEFAULT_USER_ID,
+        owner,
         '{"cached": true}',
         {"home_account_id": "missing"},
         123,
     )
 
     assert graph_auth.acquire_token_silent_once(clear_on_failure=True) is None
-    cache_json, _account = database.load_oauth_token_cache(config.DEFAULT_USER_ID)
+    cache_json, _account = database.load_oauth_token_cache(owner)
     assert cache_json == '{"cached": true}'
     assert fake_st.session_state[graph_auth.SILENT_RESULT_STATE_KEY] == "no_account"
+
+
+def test_account_selection_requires_exact_home_account_id(monkeypatch) -> None:
+    fake_st = FakeStreamlit()
+    app = FakeMsalApp()
+    app.accounts = [
+        {"home_account_id": "other-home", "username": "other@example.com"},
+        {"home_account_id": "home-1", "username": "user@example.com"},
+    ]
+    _configure_live_auth(monkeypatch, fake_st, app=app)
+    fake_st.session_state[graph_auth.ACCOUNT_HOME_ID_STATE_KEY] = "home-1"
+
+    assert graph_auth._select_account(app, {"home_account_id": "home-1"})["username"] == "user@example.com"
+
+
+def test_accounts_zero_index_is_not_silent_fallback(monkeypatch) -> None:
+    fake_st = FakeStreamlit()
+    app = FakeMsalApp()
+    app.accounts = [
+        {"home_account_id": "wrong-home", "username": "wrong@example.com"},
+        {"home_account_id": "other-home", "username": "other@example.com"},
+    ]
+    _configure_live_auth(monkeypatch, fake_st, app=app)
+    fake_st.session_state[graph_auth.ACCOUNT_HOME_ID_STATE_KEY] = "home-1"
+
+    assert graph_auth._select_account(app, {"home_account_id": "home-1"}) is None
+
+
+def test_logout_deletes_only_active_user_cache(monkeypatch) -> None:
+    fake_st = FakeStreamlit()
+    _configure_live_auth(monkeypatch, fake_st)
+    active_owner = _complete_sign_in(fake_st)
+    other_owner = _account_owner("other-home")
+    database.store_oauth_token_cache(
+        other_owner,
+        '{"other": true}',
+        {"home_account_id": "other-home", "username": "other@example.com"},
+        123,
+    )
+
+    graph_auth.logout_user(clear_persisted=True)
+
+    active_json, _active_account = database.load_oauth_token_cache(active_owner)
+    other_json, _other_account = database.load_oauth_token_cache(other_owner)
+    assert active_json == ""
+    assert other_json == '{"other": true}'

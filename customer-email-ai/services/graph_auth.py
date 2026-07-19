@@ -32,7 +32,11 @@ AUTH_CODE_SUCCESS_STATE_KEY = "outlook_auth_code_success"
 AUTH_ERROR_STATE_KEY = "outlook_auth_error"
 CALLBACK_CACHE_SAVED_STATE_KEY = "outlook_callback_cache_saved"
 SILENT_RESULT_STATE_KEY = "outlook_silent_token_result"
+AUTH_SESSION_ID_STATE_KEY = "outlook_auth_session_id"
+TOKEN_CACHE_OWNER_STATE_KEY = "outlook_token_cache_owner"
+ACCOUNT_HOME_ID_STATE_KEY = "outlook_account_home_account_id"
 REQUIRED_MAIL_SCOPE = "Mail.Read"
+LEGACY_SHARED_CACHE_OWNER = "default_user"
 SILENT_TOKEN_SCOPES = [
     "https://graph.microsoft.com/User.Read",
     "https://graph.microsoft.com/Mail.Read",
@@ -68,13 +72,15 @@ def create_login_url() -> str:
         raise RuntimeError(f"Live Outlook configuration is missing: {', '.join(missing)}")
 
     _clear_callback_query_params()
+    _delete_legacy_shared_cache()
     now = int(time.time())
     database.delete_expired_oauth_auth_flows(now)
     st.session_state[AUTH_ERROR_STATE_KEY] = ""
     LOGGER.debug("create_auth_flow: auth_flow exists=%s state=%s", False, "")
 
     flow_id = secrets.token_urlsafe(32)
-    token_cache, _account = _load_msal_token_cache()
+    temporary_owner = _temporary_cache_owner()
+    token_cache, _account = _load_msal_token_cache(temporary_owner)
     app = _build_msal_app(token_cache)
     flow = app.initiate_auth_code_flow(
         scopes=config.GRAPH_SCOPES,
@@ -87,6 +93,7 @@ def create_login_url() -> str:
         raise RuntimeError("Microsoft login URL could not be created.")
 
     flow_id = str(flow.get("state") or flow_id)
+    flow["_cache_owner"] = temporary_owner
     database.store_oauth_auth_flow(
         flow_id=flow_id,
         flow=flow,
@@ -97,6 +104,7 @@ def create_login_url() -> str:
     st.session_state[AUTH_FLOW_STATE_KEY] = flow
     st.session_state[AUTH_CODE_ATTEMPT_STATE_KEY] = ""
     st.session_state[AUTH_CODE_SUCCESS_STATE_KEY] = ""
+    st.session_state[TOKEN_CACHE_OWNER_STATE_KEY] = temporary_owner
     return auth_uri
 
 
@@ -109,7 +117,8 @@ def acquire_token_by_authorization_code(code: str) -> dict[str, Any]:
     """Exchange an authorization code for delegated Microsoft Graph tokens."""
     if config.is_mock_mode():
         return {"access_token": "mock-access-token", "account": {"username": config.APP_USER_EMAIL}}
-    token_cache, stored_account = _load_msal_token_cache()
+    cache_owner = _temporary_cache_owner()
+    token_cache, stored_account = _load_msal_token_cache(cache_owner)
     app = _build_msal_app(token_cache)
     result = app.acquire_token_by_authorization_code(
         code=code,
@@ -122,19 +131,30 @@ def acquire_token_by_authorization_code(code: str) -> dict[str, Any]:
         granted = ", ".join(granted_scopes(result)) or "none"
         raise RuntimeError(f"Microsoft token did not include {REQUIRED_MAIL_SCOPE}. Granted scopes: {granted}.")
     _validate_graph_access_token(result)
+    account = _account_from_result_or_cache(result, app, stored_account)
+    permanent_owner = _permanent_cache_owner(account)
+    if not permanent_owner:
+        raise RuntimeError("Microsoft sign-in did not return a stable account id. Please connect Outlook again.")
     _store_token_result(result)
+    _remember_account_owner(account, permanent_owner)
     _remember_callback_cache_saved(
-        _persist_msal_token_cache(token_cache, _account_from_result_or_cache(result, app, stored_account))
+        _persist_msal_token_cache(token_cache, account, permanent_owner)
     )
-    _verify_persisted_msal_cache()
+    _delete_temp_cache_if_needed(cache_owner, permanent_owner)
+    _verify_persisted_msal_cache(permanent_owner)
     return result
 
 
-def acquire_token_by_auth_code_flow(flow: dict[str, Any], callback_params: dict[str, Any]) -> dict[str, Any]:
+def acquire_token_by_auth_code_flow(
+    flow: dict[str, Any],
+    callback_params: dict[str, Any],
+    cache_owner: str | None = None,
+) -> dict[str, Any]:
     """Exchange a Microsoft callback through MSAL's saved auth-code flow."""
     if config.is_mock_mode():
         return {"access_token": "mock-access-token", "account": {"username": config.APP_USER_EMAIL}}
-    token_cache, stored_account = _load_msal_token_cache()
+    flow_owner = cache_owner or str(flow.get("_cache_owner") or "") or _temporary_cache_owner()
+    token_cache, stored_account = _load_msal_token_cache(flow_owner)
     app = _build_msal_app(token_cache)
     LOGGER.debug(
         "acquire_token_by_auth_code_flow: auth_flow exists=%s state=%s request_code=%s",
@@ -156,11 +176,17 @@ def acquire_token_by_auth_code_flow(flow: dict[str, Any], callback_params: dict[
         granted = ", ".join(granted_scopes(result)) or "none"
         raise RuntimeError(f"Microsoft token did not include {REQUIRED_MAIL_SCOPE}. Granted scopes: {granted}.")
     _validate_graph_access_token(result)
+    account = _account_from_result_or_cache(result, app, stored_account)
+    permanent_owner = _permanent_cache_owner(account)
+    if not permanent_owner:
+        raise RuntimeError("Microsoft sign-in did not return a stable account id. Please connect Outlook again.")
     _store_token_result(result)
+    _remember_account_owner(account, permanent_owner)
     _remember_callback_cache_saved(
-        _persist_msal_token_cache(token_cache, _account_from_result_or_cache(result, app, stored_account))
+        _persist_msal_token_cache(token_cache, account, permanent_owner)
     )
-    _verify_persisted_msal_cache()
+    _delete_temp_cache_if_needed(flow_owner, permanent_owner)
+    _verify_persisted_msal_cache(permanent_owner)
     return result
 
 
@@ -221,7 +247,7 @@ def handle_auth_callback() -> bool:
 
     try:
         st.session_state[AUTH_CODE_ATTEMPT_STATE_KEY] = code_attempt
-        acquire_token_by_auth_code_flow(flow or {}, params)
+        acquire_token_by_auth_code_flow(flow or {}, params, cache_owner=str((flow or {}).get("_cache_owner") or ""))
         database.delete_oauth_auth_flow(flow_id)
         st.session_state[AUTH_STATE_KEY] = ""
         st.session_state.pop(AUTH_FLOW_STATE_KEY, None)
@@ -273,7 +299,13 @@ def acquire_token_silent_once(force_refresh: bool = False, clear_on_failure: boo
     if config.is_mock_mode():
         return "mock-access-token"
     LOGGER.info("Starting MSAL silent token acquisition force_refresh=%s.", force_refresh)
-    token_cache, stored_account = _load_msal_token_cache()
+    _delete_legacy_shared_cache()
+    cache_owner = _authenticated_cache_owner()
+    if not cache_owner:
+        LOGGER.warning("MSAL silent token acquisition skipped: no authenticated cache owner for this session.")
+        _remember_silent_token_result("no_cache_owner")
+        return None
+    token_cache, stored_account = _load_msal_token_cache(cache_owner)
     app = _build_msal_app(token_cache)
     account = _select_account(app, stored_account)
     if not account:
@@ -282,14 +314,16 @@ def acquire_token_silent_once(force_refresh: bool = False, clear_on_failure: boo
         return None
 
     result = _acquire_token_silent(app, account, SILENT_TOKEN_SCOPES, force_refresh=force_refresh)
-    _persist_msal_token_cache(token_cache, account)
+    _persist_msal_token_cache(token_cache, account, cache_owner)
     if result and "access_token" in result:
         if not has_granted_scope(REQUIRED_MAIL_SCOPE, result):
             granted = ", ".join(granted_scopes(result)) or "none"
             raise RuntimeError(f"Microsoft token did not include {REQUIRED_MAIL_SCOPE}. Granted scopes: {granted}.")
         _validate_graph_access_token(result)
         _store_token_result(result)
-        _persist_msal_token_cache(token_cache, _account_from_result_or_cache(result, app, account))
+        refreshed_account = _account_from_result_or_cache(result, app, account)
+        _remember_account_owner(refreshed_account, cache_owner)
+        _persist_msal_token_cache(token_cache, refreshed_account, cache_owner)
         _remember_silent_token_result("access_token")
         LOGGER.info(
             "MSAL silent token acquisition succeeded for scopes=%s.",
@@ -313,6 +347,9 @@ def acquire_token_silent_once(force_refresh: bool = False, clear_on_failure: boo
 
 def logout_user(clear_persisted: bool = True) -> None:
     """Disconnect Outlook by removing account and token data from session state."""
+    flow_id = str(st.session_state.get(AUTH_STATE_KEY) or "")
+    cache_owner = _authenticated_cache_owner()
+    temporary_owner = _temporary_cache_owner()
     st.session_state[TOKEN_STATE_KEY] = {}
     st.session_state[ACCOUNT_STATE_KEY] = {}
     st.session_state[USER_STATE_KEY] = {}
@@ -323,8 +360,13 @@ def logout_user(clear_persisted: bool = True) -> None:
     st.session_state["outlook_selected_messages"] = []
     st.session_state["outlook_import_summary"] = None
     st.session_state[SILENT_RESULT_STATE_KEY] = ""
+    st.session_state[TOKEN_CACHE_OWNER_STATE_KEY] = ""
+    st.session_state[ACCOUNT_HOME_ID_STATE_KEY] = ""
     if clear_persisted:
-        _clear_persisted_auth()
+        _clear_persisted_auth(cache_owner)
+        _clear_persisted_auth(temporary_owner)
+        if flow_id:
+            database.delete_oauth_auth_flow(flow_id)
 
 
 def is_connected() -> bool:
@@ -369,7 +411,10 @@ def token_exists() -> bool:
     expires_at = int(token_result.get("expires_at") or 0)
     if access_token and expires_at > int(time.time()) + 60:
         return True
-    cache_json, _account = database.load_oauth_token_cache(_token_cache_owner())
+    cache_owner = _authenticated_cache_owner()
+    if not cache_owner:
+        return False
+    cache_json, _account = database.load_oauth_token_cache(cache_owner)
     return bool(cache_json)
 
 
@@ -421,7 +466,10 @@ def connected_user() -> dict[str, Any]:
     cached = dict(st.session_state.get(USER_STATE_KEY) or {})
     if cached:
         return cached
-    _cache_json, account = database.load_oauth_token_cache(_token_cache_owner())
+    cache_owner = _authenticated_cache_owner()
+    if not cache_owner:
+        return {}
+    _cache_json, account = database.load_oauth_token_cache(cache_owner)
     safe_account = _safe_account_metadata(account or {})
     if safe_account:
         st.session_state[USER_STATE_KEY] = safe_account
@@ -436,12 +484,15 @@ def set_connected_user(user: dict[str, Any]) -> None:
         "userPrincipalName": user.get("userPrincipalName", ""),
         "id": user.get("id", ""),
     }
-    cache_json, account = database.load_oauth_token_cache(_token_cache_owner())
+    cache_owner = _authenticated_cache_owner()
+    if not cache_owner:
+        return
+    cache_json, account = database.load_oauth_token_cache(cache_owner)
     if cache_json:
         merged_account = dict(account or {})
         merged_account.update(st.session_state[USER_STATE_KEY])
         database.store_oauth_token_cache(
-            _token_cache_owner(),
+            cache_owner,
             cache_json,
             _safe_account_metadata(merged_account),
             int(time.time()),
@@ -465,16 +516,22 @@ def auth_diagnostics() -> dict[str, str]:
         }
         diagnostics.update(token_diagnostics)
         return diagnostics
+    cache_owner = _authenticated_cache_owner()
     try:
-        cache_json, stored_account = database.load_oauth_token_cache(_token_cache_owner())
+        cache_json, stored_account = _load_cache_record(cache_owner)
     except Exception:
         diagnostics = {
             "persisted_cache_exists": "Unknown",
             "accounts_found": "0",
             "silent_token_result": "database_error",
             "cache_saved_after_callback": "Yes" if _session_state_get(CALLBACK_CACHE_SAVED_STATE_KEY) else "No",
-            "cache_owner": _token_cache_owner(),
+            "cache_owner": _safe_owner_label(cache_owner),
             "stored_account": "Unknown",
+            "account_metadata_present": "Unknown",
+            "username_present": "Unknown",
+            "home_account_id_present": "Unknown",
+            "cache_ownership_mode": "per-account",
+            "exact_account_match_used": "Unknown",
         }
         diagnostics.update(token_diagnostics)
         return diagnostics
@@ -489,13 +546,19 @@ def auth_diagnostics() -> dict[str, str]:
         st.session_state[AUTH_ERROR_STATE_KEY] = _format_token_error(
             {"error": exc.__class__.__name__, "error_description": str(exc)}
         )
+    account_match = _matching_account_exists(stored_account) if cache_owner else False
     diagnostics = {
         "persisted_cache_exists": "Yes" if cache_json else "No",
         "accounts_found": str(accounts_count),
         "silent_token_result": str(_session_state_get(SILENT_RESULT_STATE_KEY) or "not_run"),
         "cache_saved_after_callback": "Yes" if _session_state_get(CALLBACK_CACHE_SAVED_STATE_KEY) else "No",
-        "cache_owner": _token_cache_owner(),
+        "cache_owner": _safe_owner_label(cache_owner),
         "stored_account": "Yes" if stored_account else "No",
+        "account_metadata_present": "Yes" if stored_account or st.session_state.get(ACCOUNT_STATE_KEY) else "No",
+        "username_present": "Yes" if (stored_account or st.session_state.get(ACCOUNT_STATE_KEY) or {}).get("username") else "No",
+        "home_account_id_present": "Yes" if (stored_account or st.session_state.get(ACCOUNT_STATE_KEY) or {}).get("home_account_id") else "No",
+        "cache_ownership_mode": "per-account",
+        "exact_account_match_used": "Yes" if account_match else "No",
     }
     diagnostics.update(token_diagnostics)
     return diagnostics
@@ -509,12 +572,71 @@ def _store_token_result(result: dict[str, Any]) -> None:
     if result.get("account"):
         account = _safe_account_metadata(result["account"])
         st.session_state[ACCOUNT_STATE_KEY] = account
+        if account.get("home_account_id"):
+            st.session_state[ACCOUNT_HOME_ID_STATE_KEY] = account["home_account_id"]
         st.session_state[USER_STATE_KEY] = account
 
 
-def _token_cache_owner() -> str:
-    """Return the server-side token cache owner for this single-user app."""
-    return str(config.DEFAULT_USER_ID or "default_user")
+def _remember_account_owner(account: dict[str, Any], cache_owner: str) -> None:
+    """Remember the authenticated account and per-account cache owner for this session."""
+    safe_account = _safe_account_metadata(account)
+    st.session_state[ACCOUNT_STATE_KEY] = safe_account
+    st.session_state[USER_STATE_KEY] = safe_account
+    st.session_state[TOKEN_CACHE_OWNER_STATE_KEY] = cache_owner
+    st.session_state[ACCOUNT_HOME_ID_STATE_KEY] = str(safe_account.get("home_account_id") or "")
+
+
+def _delete_temp_cache_if_needed(temporary_owner: str, permanent_owner: str) -> None:
+    """Remove temporary per-browser cache after it has migrated to the account owner."""
+    if temporary_owner and temporary_owner != permanent_owner:
+        _clear_persisted_auth(temporary_owner)
+
+
+def _ensure_auth_session_id() -> str:
+    """Return the per-browser auth session id, creating one if needed."""
+    session_id = str(st.session_state.get(AUTH_SESSION_ID_STATE_KEY) or "")
+    if not session_id:
+        session_id = secrets.token_urlsafe(32)
+        st.session_state[AUTH_SESSION_ID_STATE_KEY] = session_id
+    return session_id
+
+
+def _temporary_cache_owner() -> str:
+    """Return the temporary cache owner derived from the per-browser auth session id."""
+    return f"session:{_sha256_text(_ensure_auth_session_id())}"
+
+
+def _permanent_cache_owner(account: dict[str, Any]) -> str:
+    """Return the permanent per-account cache owner."""
+    home_account_id = str(account.get("home_account_id") or "")
+    if not home_account_id:
+        return ""
+    return f"account:{_sha256_text(f'{home_account_id}|{config.CLIENT_ID}')}"
+
+
+def _authenticated_cache_owner() -> str:
+    """Return the current session's authenticated cache owner, never the legacy shared owner."""
+    owner = str(st.session_state.get(TOKEN_CACHE_OWNER_STATE_KEY) or "")
+    if owner == LEGACY_SHARED_CACHE_OWNER:
+        return ""
+    return owner if owner.startswith("account:") else ""
+
+
+def _sha256_text(value: str) -> str:
+    """Return a SHA-256 hex digest."""
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _safe_owner_label(cache_owner: str | None) -> str:
+    """Return a non-secret label for cache ownership diagnostics."""
+    owner = str(cache_owner or "")
+    if owner.startswith("account:"):
+        return "per-account"
+    if owner.startswith("session:"):
+        return "per-browser-session"
+    if owner == LEGACY_SHARED_CACHE_OWNER:
+        return "legacy-shared-disabled"
+    return "none"
 
 
 def _new_msal_token_cache() -> Any | None:
@@ -524,15 +646,16 @@ def _new_msal_token_cache() -> Any | None:
     return msal.SerializableTokenCache()
 
 
-def _load_msal_token_cache() -> tuple[Any | None, dict[str, Any] | None]:
+def _load_msal_token_cache(cache_owner: str | None) -> tuple[Any | None, dict[str, Any] | None]:
     """Load the serialized MSAL cache and account metadata from SQLite."""
+    _delete_legacy_shared_cache()
     token_cache = _new_msal_token_cache()
-    cache_json, account = database.load_oauth_token_cache(_token_cache_owner())
+    cache_json, account = _load_cache_record(cache_owner)
     LOGGER.debug(
         "MSAL token cache load: cache_exists=%s account_exists=%s owner=%s",
         bool(cache_json),
         bool(account),
-        _token_cache_owner(),
+        _safe_owner_label(cache_owner),
     )
     if token_cache is not None and cache_json:
         token_cache.deserialize(cache_json)
@@ -544,16 +667,19 @@ def _load_msal_token_cache() -> tuple[Any | None, dict[str, Any] | None]:
     return token_cache, account
 
 
-def _persist_msal_token_cache(token_cache: Any | None, account: dict[str, Any] | None) -> bool:
+def _persist_msal_token_cache(token_cache: Any | None, account: dict[str, Any] | None, cache_owner: str | None) -> bool:
     """Persist the MSAL token cache when it has changed."""
     if token_cache is None:
         LOGGER.debug("MSAL token cache save skipped: cache_exists=%s", False)
+        return False
+    if not cache_owner or cache_owner == LEGACY_SHARED_CACHE_OWNER:
+        LOGGER.debug("MSAL token cache save skipped: no valid per-session/per-account owner.")
         return False
     if not getattr(token_cache, "has_state_changed", False):
         LOGGER.debug("MSAL token cache save skipped: cache_changed=%s", False)
         return False
     database.store_oauth_token_cache(
-        cache_owner=_token_cache_owner(),
+        cache_owner=cache_owner,
         cache_json=str(token_cache.serialize()),
         account=_safe_account_metadata(account or {}),
         updated_at=int(time.time()),
@@ -561,15 +687,15 @@ def _persist_msal_token_cache(token_cache: Any | None, account: dict[str, Any] |
     LOGGER.debug(
         "MSAL token cache save: saved=%s owner=%s account_exists=%s",
         True,
-        _token_cache_owner(),
+        _safe_owner_label(cache_owner),
         bool(account),
     )
     return True
 
 
-def _verify_persisted_msal_cache() -> None:
+def _verify_persisted_msal_cache(cache_owner: str) -> None:
     """Verify the callback persisted a reloadable MSAL cache."""
-    cache_json, _account = database.load_oauth_token_cache(_token_cache_owner())
+    cache_json, _account = database.load_oauth_token_cache(cache_owner)
     LOGGER.debug("MSAL token cache verify: cache_exists=%s", bool(cache_json))
     if not cache_json:
         raise RuntimeError("Microsoft token cache was not saved. Please connect Outlook again.")
@@ -640,9 +766,25 @@ def _session_token_diagnostics() -> dict[str, str]:
     }
 
 
-def _clear_persisted_auth() -> None:
+def _load_cache_record(cache_owner: str | None) -> tuple[str, dict[str, Any] | None]:
+    """Load a cache record only for an explicit non-legacy owner."""
+    if not cache_owner or cache_owner == LEGACY_SHARED_CACHE_OWNER:
+        return "", None
+    return database.load_oauth_token_cache(cache_owner)
+
+
+def _clear_persisted_auth(cache_owner: str | None) -> None:
     """Remove persisted token cache and account metadata."""
-    database.delete_oauth_token_cache(_token_cache_owner())
+    if cache_owner and cache_owner != LEGACY_SHARED_CACHE_OWNER:
+        database.delete_oauth_token_cache(cache_owner)
+
+
+def _delete_legacy_shared_cache() -> None:
+    """Delete the legacy shared token cache and never load it again."""
+    try:
+        database.delete_oauth_token_cache(LEGACY_SHARED_CACHE_OWNER)
+    except Exception:
+        LOGGER.exception("Could not delete legacy shared Outlook token cache.")
 
 
 def _select_account(app: Any, stored_account: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -650,15 +792,33 @@ def _select_account(app: Any, stored_account: dict[str, Any] | None) -> dict[str
     accounts = _get_accounts(app)
     if not accounts:
         return None
-    stored = stored_account or {}
-    for key in ("home_account_id", "local_account_id", "username"):
-        wanted = stored.get(key)
-        if not wanted:
-            continue
-        for account in accounts:
-            if account.get(key) == wanted:
-                return account
-    return accounts[0]
+    wanted_home_account_id = _authenticated_home_account_id(stored_account)
+    if not wanted_home_account_id:
+        LOGGER.warning("MSAL account selection skipped: no authenticated home_account_id in this session.")
+        return None
+    for account in accounts:
+        if str(account.get("home_account_id") or "") == wanted_home_account_id:
+            return account
+    LOGGER.warning("MSAL account selection skipped: no exact home_account_id match.")
+    return None
+
+
+def _authenticated_home_account_id(stored_account: dict[str, Any] | None = None) -> str:
+    """Return the current session's authenticated home account id."""
+    session_home_id = str(st.session_state.get(ACCOUNT_HOME_ID_STATE_KEY) or "")
+    if session_home_id:
+        return session_home_id
+    account = st.session_state.get(ACCOUNT_STATE_KEY) or {}
+    home_id = str(account.get("home_account_id") or "")
+    if home_id:
+        return home_id
+    return str((stored_account or {}).get("home_account_id") or "")
+
+
+def _matching_account_exists(stored_account: dict[str, Any] | None) -> bool:
+    """Return whether the stored account matches this session's account."""
+    wanted = _authenticated_home_account_id(stored_account)
+    return bool(wanted and str((stored_account or {}).get("home_account_id") or "") == wanted)
 
 
 def _get_accounts(app: Any) -> list[dict[str, Any]]:
@@ -676,13 +836,19 @@ def _account_from_result_or_cache(
     fallback_account: dict[str, Any] | None,
 ) -> dict[str, Any]:
     """Return safe account metadata from token result, cache, or fallback."""
+    claims = _decode_jwt_payload(str(result.get("access_token") or ""))
     if isinstance(result.get("account"), dict):
-        return _safe_account_metadata(result["account"])
-    account = _select_account(app, fallback_account)
-    return _safe_account_metadata(account or fallback_account or {})
+        return _safe_account_metadata(result["account"], claims)
+    fallback = _safe_account_metadata(fallback_account or {}, claims)
+    if fallback.get("home_account_id"):
+        return fallback
+    accounts = _get_accounts(app)
+    if len(accounts) == 1:
+        return _safe_account_metadata(accounts[0], claims)
+    return fallback
 
 
-def _safe_account_metadata(account: dict[str, Any]) -> dict[str, Any]:
+def _safe_account_metadata(account: dict[str, Any], claims: dict[str, Any] | None = None) -> dict[str, Any]:
     """Keep only non-token account fields needed to find the MSAL account again."""
     safe_keys = (
         "home_account_id",
@@ -690,12 +856,20 @@ def _safe_account_metadata(account: dict[str, Any]) -> dict[str, Any]:
         "username",
         "environment",
         "realm",
+        "tenant_id",
+        "tid",
         "displayName",
         "mail",
         "userPrincipalName",
         "id",
     )
-    return {key: str(account.get(key, "")) for key in safe_keys if account.get(key)}
+    safe = {key: str(account.get(key, "")) for key in safe_keys if account.get(key)}
+    claims = claims or {}
+    tenant_id = str(claims.get("tid") or account.get("tenant_id") or account.get("realm") or "")
+    if tenant_id:
+        safe["tenant_id"] = tenant_id
+        safe["tid"] = tenant_id
+    return safe
 
 
 def _acquire_token_silent(
