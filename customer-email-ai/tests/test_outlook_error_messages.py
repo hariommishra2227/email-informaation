@@ -67,7 +67,7 @@ def test_only_invalid_authentication_token_maps_to_session_expired() -> None:
     expired_message = page._friendly_exception_message(expired_session)
     assert (
         "Microsoft Graph HTTP 401 InvalidAuthenticationToken: "
-        "Access token has expired. Token audience: missing"
+        "Access token has expired. Token audience: opaque/unavailable"
     ) in expired_message
     assert "Graph Request" in expired_message
     assert page._friendly_exception_message(mailbox_error) == (

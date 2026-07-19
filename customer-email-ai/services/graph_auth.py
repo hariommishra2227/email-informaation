@@ -125,12 +125,8 @@ def acquire_token_by_authorization_code(code: str) -> dict[str, Any]:
         scopes=config.GRAPH_SCOPES,
         redirect_uri=config.REDIRECT_URI,
     )
-    if "access_token" not in result:
-        raise RuntimeError(_format_token_error(result))
-    if not has_granted_scope(REQUIRED_MAIL_SCOPE, result):
-        granted = ", ".join(granted_scopes(result)) or "none"
-        raise RuntimeError(f"Microsoft token did not include {REQUIRED_MAIL_SCOPE}. Granted scopes: {granted}.")
-    _validate_graph_access_token(result)
+    _validate_successful_token_result(result, "authorization_code")
+    _log_access_token_jwt_diagnostics(result, "authorization_code")
     account = _account_from_result_or_cache(result, app, stored_account)
     permanent_owner = _permanent_cache_owner(account)
     if not permanent_owner:
@@ -170,12 +166,8 @@ def acquire_token_by_auth_code_flow(
         str(result.get("error") or ""),
         bool(getattr(token_cache, "has_state_changed", False)),
     )
-    if "access_token" not in result:
-        raise RuntimeError(_format_token_error(result))
-    if not has_granted_scope(REQUIRED_MAIL_SCOPE, result):
-        granted = ", ".join(granted_scopes(result)) or "none"
-        raise RuntimeError(f"Microsoft token did not include {REQUIRED_MAIL_SCOPE}. Granted scopes: {granted}.")
-    _validate_graph_access_token(result)
+    _validate_successful_token_result(result, "auth_code_flow")
+    _log_access_token_jwt_diagnostics(result, "auth_code_flow")
     account = _account_from_result_or_cache(result, app, stored_account)
     permanent_owner = _permanent_cache_owner(account)
     if not permanent_owner:
@@ -281,6 +273,9 @@ def get_valid_access_token() -> str:
         expires_at = 0
 
     if access_token and expires_at > int(time.time()) + 60:
+        if not _has_required_scope_when_available(token_result):
+            granted = ", ".join(granted_scopes(token_result)) or "none"
+            raise RuntimeError(f"Microsoft token did not include {REQUIRED_MAIL_SCOPE}. Granted scopes: {granted}.")
         LOGGER.info("Using current Streamlit session access token.")
         return access_token
 
@@ -316,10 +311,8 @@ def acquire_token_silent_once(force_refresh: bool = False, clear_on_failure: boo
     result = _acquire_token_silent(app, account, SILENT_TOKEN_SCOPES, force_refresh=force_refresh)
     _persist_msal_token_cache(token_cache, account, cache_owner)
     if result and "access_token" in result:
-        if not has_granted_scope(REQUIRED_MAIL_SCOPE, result):
-            granted = ", ".join(granted_scopes(result)) or "none"
-            raise RuntimeError(f"Microsoft token did not include {REQUIRED_MAIL_SCOPE}. Granted scopes: {granted}.")
-        _validate_graph_access_token(result)
+        _validate_successful_token_result(result, "silent")
+        _log_access_token_jwt_diagnostics(result, "silent")
         _store_token_result(result)
         refreshed_account = _account_from_result_or_cache(result, app, account)
         _remember_account_owner(refreshed_account, cache_owner)
@@ -385,8 +378,7 @@ def is_connected() -> bool:
     if (
         access_token
         and expires_at > int(time.time()) + 60
-        and has_granted_scope(REQUIRED_MAIL_SCOPE, token_result)
-        and is_graph_access_token(token_result)
+        and _has_required_scope_when_available(token_result)
     ):
         LOGGER.info("Outlook is connected using current Streamlit session token.")
         return True
@@ -397,8 +389,7 @@ def is_connected() -> bool:
     )
     connected = bool(
         silent_token
-        and has_granted_scope(REQUIRED_MAIL_SCOPE)
-        and is_graph_access_token()
+        and _has_required_scope_when_available()
     )
     LOGGER.info("Outlook connected via persisted MSAL cache: %s.", connected)
     return connected
@@ -453,7 +444,7 @@ def access_token_audience(token_result: dict[str, Any] | None = None) -> str:
     token_data = token_result or st.session_state.get(TOKEN_STATE_KEY, {}) or {}
     access_token = str(token_data.get("access_token") or "")
     claims = _decode_jwt_payload(access_token)
-    return str(claims.get("aud") or "")
+    return str(claims.get("aud") or "opaque/unavailable")
 
 
 def is_graph_access_token(token_result: dict[str, Any] | None = None) -> bool:
@@ -565,9 +556,22 @@ def auth_diagnostics() -> dict[str, str]:
 
 
 def _store_token_result(result: dict[str, Any]) -> None:
-    """Store the current token result in session state only."""
-    token_result = dict(result)
-    token_result["expires_at"] = int(time.time()) + int(token_result.get("expires_in", 0))
+    """Store only the current MSAL access-token result in session state."""
+    access_token = str(result.get("access_token") or "")
+    token_result: dict[str, Any] = {
+        "access_token": access_token,
+        "expires_in": int(result.get("expires_in") or 0),
+        "scope": str(result.get("scope") or ""),
+        "token_type": str(result.get("token_type") or "Bearer"),
+    }
+    if result.get("ext_expires_in") is not None:
+        token_result["ext_expires_in"] = int(result.get("ext_expires_in") or 0)
+    if isinstance(result.get("account"), dict):
+        token_result["account"] = _safe_account_metadata(result["account"])
+    if result.get("expires_at") not in (None, ""):
+        token_result["expires_at"] = int(result.get("expires_at") or 0)
+    else:
+        token_result["expires_at"] = int(time.time()) + int(token_result.get("expires_in", 0))
     st.session_state[TOKEN_STATE_KEY] = token_result
     if result.get("account"):
         account = _safe_account_metadata(result["account"])
@@ -759,7 +763,11 @@ def _session_token_diagnostics() -> dict[str, str]:
         "session_token_expires_at": str(expires_at or ""),
         "session_token_expired": "Yes" if expires_at and expires_at <= now + 60 else "No",
         "session_token_aud": audience,
-        "session_token_graph_audience_valid": "Yes" if audience in MICROSOFT_GRAPH_AUDIENCES else "No",
+        "session_token_graph_audience_valid": (
+            "Unknown" if audience == "opaque/unavailable"
+            else "Yes" if audience in MICROSOFT_GRAPH_AUDIENCES
+            else "No"
+        ),
         "session_token_tid": str(claims.get("tid") or ""),
         "session_token_scopes": ", ".join(scope for scope in scopes.split() if scope),
         "session_current_timestamp": str(now),
@@ -921,15 +929,77 @@ def _scope_name(scope: str) -> str:
     return str(scope or "").rstrip("/").split("/")[-1]
 
 
-def _validate_graph_access_token(result: dict[str, Any]) -> None:
-    """Reject access tokens that were not issued for Microsoft Graph."""
-    if is_graph_access_token(result):
-        return
-    audience = access_token_audience(result) or "missing"
-    raise RuntimeError(
-        "Microsoft issued an access token for the wrong resource. "
-        f"Token audience: {audience}. Expected Microsoft Graph."
+def _validate_successful_token_result(result: dict[str, Any], source: str) -> None:
+    """Validate only client-observable MSAL token fields without decoding resource claims."""
+    if "access_token" not in result:
+        raise RuntimeError(_format_token_error(result))
+    access_token = result.get("access_token")
+    if not isinstance(access_token, str) or not access_token.strip():
+        raise RuntimeError("Microsoft token response did not include a usable access token.")
+    _validate_token_expiry_fields(result, source)
+    if _scope_information_available(result) and not has_granted_scope(REQUIRED_MAIL_SCOPE, result):
+        granted = ", ".join(granted_scopes(result)) or "none"
+        raise RuntimeError(f"Microsoft token did not include {REQUIRED_MAIL_SCOPE}. Granted scopes: {granted}.")
+
+
+def _validate_token_expiry_fields(result: dict[str, Any], source: str) -> None:
+    """Validate MSAL expiry values when they are provided."""
+    for field in ("expires_in", "expires_at"):
+        if result.get(field) in (None, ""):
+            continue
+        try:
+            value = int(result.get(field) or 0)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f"Microsoft token response included an invalid {field} value.") from exc
+        if field == "expires_in" and value <= 0:
+            raise RuntimeError("Microsoft token response included an expired access token.")
+        if field == "expires_at" and value <= int(time.time()) + 60:
+            raise RuntimeError("Microsoft token response included an expired access token.")
+    LOGGER.debug("MSAL token expiry validation succeeded source=%s.", source)
+
+
+def _scope_information_available(token_result: dict[str, Any] | None = None) -> bool:
+    """Return whether MSAL or a decodable token exposed delegated scope information."""
+    token_data = token_result if token_result is not None else st.session_state.get(TOKEN_STATE_KEY, {})
+    if str((token_data or {}).get("scope") or "").strip():
+        return True
+    access_token = str((token_data or {}).get("access_token") or "")
+    claims = _decode_jwt_payload(access_token)
+    return bool(str(claims.get("scp") or "").strip())
+
+
+def _has_required_scope_when_available(token_result: dict[str, Any] | None = None) -> bool:
+    """Require Mail.Read only when scope information is locally available."""
+    if not _scope_information_available(token_result):
+        return True
+    return has_granted_scope(REQUIRED_MAIL_SCOPE, token_result)
+
+
+def _log_access_token_jwt_diagnostics(result: dict[str, Any], source: str) -> None:
+    """Log safe JWT header/payload fields for the MSAL access token only."""
+    access_token = str(result.get("access_token") or "")
+    header = _decode_jwt_header(access_token)
+    payload = _decode_jwt_payload(access_token)
+    LOGGER.info(
+        "MSAL access token diagnostics source=%s token_present=%s token_length=%s "
+        "header_typ=%s payload_aud=%s payload_scp=%s payload_iss=%s payload_typ=%s "
+        "id_token_present=%s id_token_claims_present=%s",
+        source,
+        bool(access_token),
+        len(access_token),
+        _safe_jwt_claim(header.get("typ")),
+        _safe_jwt_claim(payload.get("aud") or "opaque/unavailable"),
+        _safe_jwt_claim(payload.get("scp")),
+        _safe_jwt_claim(payload.get("iss")),
+        _safe_jwt_claim(payload.get("typ")),
+        bool(result.get("id_token")),
+        bool(result.get("id_token_claims")),
     )
+
+
+def _validate_graph_access_token(result: dict[str, Any]) -> None:
+    """Deprecated no-op: Microsoft Graph access tokens are opaque to this client."""
+    _log_access_token_jwt_diagnostics(result, "optional_audience_diagnostic")
 
 
 def _format_token_error(result: dict[str, Any]) -> str:
@@ -966,6 +1036,30 @@ def _decode_jwt_payload(access_token: str) -> dict[str, Any]:
     except (ValueError, json.JSONDecodeError):
         return {}
     return claims if isinstance(claims, dict) else {}
+
+
+def _decode_jwt_header(access_token: str) -> dict[str, Any]:
+    """Decode JWT header fields for diagnostics only; this does not verify the signature."""
+    parts = access_token.split(".")
+    if not parts:
+        return {}
+    header = parts[0]
+    padding = "=" * (-len(header) % 4)
+    try:
+        decoded = base64.urlsafe_b64decode(f"{header}{padding}")
+        values = json.loads(decoded.decode("utf-8"))
+    except (ValueError, json.JSONDecodeError):
+        return {}
+    return values if isinstance(values, dict) else {}
+
+
+def _safe_jwt_claim(value: Any) -> str:
+    """Return a compact non-token JWT diagnostic value."""
+    if value is None:
+        return ""
+    if isinstance(value, (list, tuple, set)):
+        return " ".join(str(item) for item in value)
+    return str(value)
 
 
 def _friendly_error_text(message: str) -> str:

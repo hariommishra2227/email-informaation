@@ -19,6 +19,13 @@ def _graph_access_token() -> str:
     )
 
 
+def _id_token() -> str:
+    """Return a JWT-shaped ID token for tests."""
+    return _unsigned_jwt_with_claims(
+        {"aud": "client-id", "iss": "https://login.microsoftonline.com/tenant-1/v2.0", "typ": "ID"}
+    )
+
+
 class FakeQueryParams(dict):
     """Small stand-in for Streamlit query params."""
 
@@ -208,6 +215,127 @@ def test_auth_code_flow_successful_state_match(monkeypatch) -> None:
     assert account["tenant_id"] == "tenant-1"
     legacy_json, _legacy_account = database.load_oauth_token_cache("default_user")
     assert legacy_json == ""
+
+
+def test_auth_code_flow_persists_access_token_not_id_token(monkeypatch, caplog) -> None:
+    fake_st = FakeStreamlit()
+    access_token = _graph_access_token()
+    id_token = _id_token()
+    app = FakeMsalApp(
+        result={
+            "access_token": access_token,
+            "id_token": id_token,
+            "id_token_claims": {"aud": "client-id", "typ": "ID"},
+            "scope": "User.Read Mail.Read",
+            "expires_in": 3600,
+            "account": {
+                "home_account_id": "home-1",
+                "local_account_id": "local-1",
+                "username": "user@example.com",
+            },
+        }
+    )
+    _configure_live_auth(monkeypatch, fake_st, app=app)
+
+    graph_auth.create_login_url()
+    state = fake_st.session_state[graph_auth.AUTH_STATE_KEY]
+    fake_st.query_params.update({"code": "auth-code", "state": state})
+
+    with caplog.at_level("INFO", logger=graph_auth.LOGGER.name):
+        assert graph_auth.handle_auth_callback()
+
+    token_result = fake_st.session_state[graph_auth.TOKEN_STATE_KEY]
+    assert token_result["access_token"] == access_token
+    assert token_result["access_token"] != id_token
+    assert "id_token" not in token_result
+    assert "id_token_claims" not in token_result
+    assert graph_auth.access_token_audience(token_result) == "https://graph.microsoft.com"
+    assert "payload_aud=https://graph.microsoft.com" in caplog.text
+    assert "id_token_present=True" in caplog.text
+    assert access_token not in caplog.text
+    assert id_token not in caplog.text
+
+
+def test_auth_code_flow_accepts_opaque_access_token(monkeypatch, caplog) -> None:
+    fake_st = FakeStreamlit()
+    opaque_token = "opaque-msal-access-token"
+    app = FakeMsalApp(
+        result={
+            "access_token": opaque_token,
+            "scope": "User.Read Mail.Read",
+            "expires_in": 3600,
+            "account": {
+                "home_account_id": "home-1",
+                "local_account_id": "local-1",
+                "username": "user@example.com",
+            },
+        }
+    )
+    _configure_live_auth(monkeypatch, fake_st, app=app)
+
+    graph_auth.create_login_url()
+    state = fake_st.session_state[graph_auth.AUTH_STATE_KEY]
+    fake_st.query_params.update({"code": "auth-code", "state": state})
+
+    with caplog.at_level("INFO", logger=graph_auth.LOGGER.name):
+        assert graph_auth.handle_auth_callback()
+
+    assert fake_st.session_state[graph_auth.TOKEN_STATE_KEY]["access_token"] == opaque_token
+    assert graph_auth.get_valid_access_token() == opaque_token
+    assert graph_auth.access_token_audience() == "opaque/unavailable"
+    assert "payload_aud=opaque/unavailable" in caplog.text
+    assert opaque_token not in caplog.text
+
+
+def test_auth_code_flow_accepts_jwt_access_token_with_missing_aud(monkeypatch) -> None:
+    fake_st = FakeStreamlit()
+    token_without_aud = _unsigned_jwt_with_claims({"scp": "User.Read Mail.Read", "tid": "tenant-1"})
+    app = FakeMsalApp(
+        result={
+            "access_token": token_without_aud,
+            "scope": "User.Read Mail.Read",
+            "expires_in": 3600,
+            "account": {
+                "home_account_id": "home-1",
+                "local_account_id": "local-1",
+                "username": "user@example.com",
+            },
+        }
+    )
+    _configure_live_auth(monkeypatch, fake_st, app=app)
+
+    graph_auth.create_login_url()
+    state = fake_st.session_state[graph_auth.AUTH_STATE_KEY]
+    fake_st.query_params.update({"code": "auth-code", "state": state})
+
+    assert graph_auth.handle_auth_callback()
+    assert graph_auth.get_valid_access_token() == token_without_aud
+    assert graph_auth.access_token_audience() == "opaque/unavailable"
+
+
+def test_auth_code_flow_rejects_empty_access_token(monkeypatch) -> None:
+    fake_st = FakeStreamlit()
+    app = FakeMsalApp(
+        result={
+            "access_token": "",
+            "scope": "User.Read Mail.Read",
+            "expires_in": 3600,
+            "account": {
+                "home_account_id": "home-1",
+                "local_account_id": "local-1",
+                "username": "user@example.com",
+            },
+        }
+    )
+    _configure_live_auth(monkeypatch, fake_st, app=app)
+
+    graph_auth.create_login_url()
+    state = fake_st.session_state[graph_auth.AUTH_STATE_KEY]
+    fake_st.query_params.update({"code": "auth-code", "state": state})
+
+    assert not graph_auth.handle_auth_callback()
+    assert "usable access token" in graph_auth.auth_error()
+    assert not graph_auth.token_exists()
 
 
 def test_auth_code_flow_mismatched_state(monkeypatch) -> None:
