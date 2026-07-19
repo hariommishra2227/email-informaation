@@ -352,6 +352,53 @@ def test_connection_panel_enables_disconnect_when_valid_token(monkeypatch) -> No
     assert ("Disconnect", False) in buttons
 
 
+def test_connection_panel_displays_username_when_only_username_exists(monkeypatch) -> None:
+    """Personal-account MSAL metadata can expose the signed-in address as username only."""
+    page = _load_outlook_page()
+
+    account = _render_connection_panel_account_metric(
+        monkeypatch,
+        page,
+        {"username": "personal@example.com"},
+    )
+
+    assert account == "personal@example.com"
+    assert account != "Not connected"
+
+
+def test_connection_panel_prefers_mail_when_present(monkeypatch) -> None:
+    """The connected account label should prefer the Graph mail field."""
+    page = _load_outlook_page()
+
+    account = _render_connection_panel_account_metric(
+        monkeypatch,
+        page,
+        {
+            "mail": "mail@example.com",
+            "userPrincipalName": "upn@example.com",
+            "username": "username@example.com",
+        },
+    )
+
+    assert account == "mail@example.com"
+
+
+def test_connection_panel_uses_user_principal_name_when_mail_absent(monkeypatch) -> None:
+    """The connected account label should fall back to userPrincipalName before username."""
+    page = _load_outlook_page()
+
+    account = _render_connection_panel_account_metric(
+        monkeypatch,
+        page,
+        {
+            "userPrincipalName": "upn@example.com",
+            "username": "username@example.com",
+        },
+    )
+
+    assert account == "upn@example.com"
+
+
 def test_connection_panel_treats_expired_token_as_sign_in_available(monkeypatch) -> None:
     """Expired or unusable auth should leave Sign in available and Disconnect disabled."""
     page = _load_outlook_page()
@@ -420,6 +467,70 @@ def test_connection_panel_treats_expired_token_as_sign_in_available(monkeypatch)
     assert not page._render_connection_panel()
     assert calls["link_button"] == 1
     assert ("Disconnect", True) in buttons
+
+
+def _render_connection_panel_account_metric(monkeypatch, page, account_data: dict[str, str]) -> str:
+    """Render the connection panel and return the visible Connected account metric."""
+    metrics: dict[str, str] = {}
+    _configure_live_connection_panel(monkeypatch, page, is_connected=True)
+    monkeypatch.setattr(page.graph_auth, "connected_user", lambda: dict(account_data))
+
+    class FakeColumn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeStreamlit:
+        session_state = {}
+        query_params = {}
+
+        @staticmethod
+        def subheader(*args, **kwargs):
+            return None
+
+        @staticmethod
+        def columns(spec):
+            return [FakeColumn() for _ in spec]
+
+        @staticmethod
+        def metric(label, value, *args, **kwargs):
+            metrics[str(label)] = str(value)
+            return None
+
+        @staticmethod
+        def button(*args, **kwargs):
+            return False
+
+        @staticmethod
+        def link_button(*args, **kwargs):
+            raise AssertionError("Sign-in link should not render while connected")
+
+        @staticmethod
+        def error(*args, **kwargs):
+            return None
+
+        @staticmethod
+        def warning(*args, **kwargs):
+            return None
+
+        @staticmethod
+        def caption(*args, **kwargs):
+            return None
+
+        @staticmethod
+        def write(*args, **kwargs):
+            return None
+
+        @staticmethod
+        def expander(*args, **kwargs):
+            return FakeColumn()
+
+    monkeypatch.setattr(page, "st", FakeStreamlit)
+
+    assert page._render_connection_panel()
+    return metrics["Connected account"]
 
 
 def _configure_live_connection_panel(monkeypatch, page, is_connected: bool) -> None:

@@ -473,6 +473,12 @@ def set_connected_user(user: dict[str, Any]) -> None:
         "displayName": user.get("displayName", ""),
         "mail": user.get("mail", ""),
         "userPrincipalName": user.get("userPrincipalName", ""),
+        "username": (
+            user.get("username")
+            or user.get("mail")
+            or user.get("userPrincipalName")
+            or ""
+        ),
         "id": user.get("id", ""),
     }
     cache_owner = _authenticated_cache_owner()

@@ -162,7 +162,12 @@ def _render_connection_panel() -> bool:
         if graph_auth.auth_error():
             st.error(graph_auth.auth_error())
         account_data = graph_auth.connected_user()
-        account = account_data.get("mail") or account_data.get("userPrincipalName") or "Not connected"
+        account = (
+            account_data.get("mail")
+            or account_data.get("userPrincipalName")
+            or account_data.get("username")
+            or "Microsoft account connected"
+        )
 
     status_cols = st.columns([0.2, 0.3, 0.14, 0.2, 0.16])
     with status_cols[0]:

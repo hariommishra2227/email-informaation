@@ -553,3 +553,25 @@ def test_logout_deletes_only_active_user_cache(monkeypatch) -> None:
     other_json, _other_account = database.load_oauth_token_cache(other_owner)
     assert active_json == ""
     assert other_json == '{"other": true}'
+
+
+def test_set_connected_user_preserves_username(monkeypatch) -> None:
+    fake_st = FakeStreamlit()
+    _configure_live_auth(monkeypatch, fake_st)
+
+    graph_auth.set_connected_user({"username": "personal@example.com"})
+
+    assert fake_st.session_state[graph_auth.USER_STATE_KEY]["username"] == "personal@example.com"
+    assert fake_st.session_state[graph_auth.USER_STATE_KEY]["mail"] == ""
+    assert fake_st.session_state[graph_auth.USER_STATE_KEY]["userPrincipalName"] == ""
+
+
+def test_set_connected_user_derives_username_from_mail_or_upn(monkeypatch) -> None:
+    fake_st = FakeStreamlit()
+    _configure_live_auth(monkeypatch, fake_st)
+
+    graph_auth.set_connected_user({"mail": "mail@example.com", "userPrincipalName": "upn@example.com"})
+    assert fake_st.session_state[graph_auth.USER_STATE_KEY]["username"] == "mail@example.com"
+
+    graph_auth.set_connected_user({"userPrincipalName": "upn@example.com"})
+    assert fake_st.session_state[graph_auth.USER_STATE_KEY]["username"] == "upn@example.com"
