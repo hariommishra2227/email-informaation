@@ -48,6 +48,7 @@ def _format_received(value: str) -> str:
 def render(user_id: str) -> None:
     """Render the Outlook Inbox page."""
     initialize_outlook_session_state()
+    _ensure_refresh_session_defaults()
     st.title("Customer Email Extraction")
     st.caption("Outlook Connection -> Inbox Emails -> Select Emails -> Extract Customer Information -> Review Extracted Records -> Save to Customer Registry -> Download Excel")
     if IMPORT_ERROR is not None:
@@ -321,6 +322,16 @@ def _render_quick_actions(user_id: str) -> tuple[bool, bool, bool]:
     with action_cols[3]:
         _render_excel_export(user_id, label="Export Excel")
     return refresh_clicked, import_selected_clicked, import_unread_clicked
+
+
+def _ensure_refresh_session_defaults() -> None:
+    """Create refresh-related Outlook defaults without overwriting auth state."""
+    st.session_state.setdefault("outlook_messages_cache", [])
+    st.session_state.setdefault("outlook_selected_messages", [])
+    st.session_state.setdefault("outlook_access_token", None)
+    st.session_state.setdefault("outlook_token_expiry", None)
+    st.session_state.setdefault("outlook_authenticated_cache_owner", None)
+    st.session_state.setdefault("outlook_home_account_id", None)
 
 
 def _render_filters() -> tuple[int, str, str, tuple[date, date] | list]:

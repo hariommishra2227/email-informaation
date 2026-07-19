@@ -8,7 +8,7 @@ import time
 from typing import Any
 
 import config
-from services import graph_auth
+from services import graph_auth, graph_client
 from storage import database
 
 
@@ -95,6 +95,8 @@ class FakeMsalApp:
             "expires_in": 3600,
             "account": dict(self.accounts[0]),
         }
+        self.silent_accounts: list[dict[str, Any]] = []
+        self.silent_scopes: list[list[str]] = []
 
     def initiate_auth_code_flow(
         self,
@@ -130,6 +132,8 @@ class FakeMsalApp:
         force_refresh: bool = False,
     ) -> dict[str, Any]:
         self.silent_calls += 1
+        self.silent_scopes.append(list(scopes))
+        self.silent_accounts.append(dict(account))
         if self.silent_result is not None:
             return dict(self.silent_result)
         return {
@@ -467,7 +471,7 @@ def test_two_streamlit_sessions_cannot_load_each_others_token_caches(monkeypatch
     assert not graph_auth.token_exists()
     cache_json, _account = database.load_oauth_token_cache(owner)
     assert cache_json
-    assert new_fake_st.session_state[graph_auth.SILENT_RESULT_STATE_KEY] == "no_cache_owner"
+    assert new_fake_st.session_state[graph_auth.SILENT_RESULT_STATE_KEY] == "no_exact_account"
 
 
 def test_silent_token_renewal_force_refresh(monkeypatch) -> None:
@@ -488,6 +492,125 @@ def test_silent_token_renewal_force_refresh(monkeypatch) -> None:
     assert graph_auth.is_graph_access_token()
 
 
+def test_get_valid_access_token_restores_from_persisted_cache_after_rerun(monkeypatch) -> None:
+    fake_st = FakeStreamlit()
+    app = FakeMsalApp()
+    _configure_live_auth(monkeypatch, fake_st, app=app)
+    owner = _account_owner()
+    fake_st.session_state[graph_auth.TOKEN_CACHE_OWNER_STATE_KEY] = owner
+    fake_st.session_state[graph_auth.ACCOUNT_HOME_ID_STATE_KEY] = "home-1"
+    fake_st.session_state[graph_auth.USER_STATE_KEY] = {"username": "user@example.com"}
+    fake_st.session_state[graph_auth.TOKEN_STATE_KEY] = {}
+    app.silent_result = {
+        "access_token": "restored-token",
+        "scope": " ".join(config.GRAPH_SCOPES),
+        "expires_in": 3600,
+        "account": dict(app.accounts[0]),
+    }
+    database.store_oauth_token_cache(
+        owner,
+        '{"cached": true}',
+        {"home_account_id": "home-1", "username": "user@example.com"},
+        123,
+    )
+
+    assert graph_auth.get_valid_access_token() == "restored-token"
+
+    token_result = fake_st.session_state[graph_auth.TOKEN_STATE_KEY]
+    assert token_result["access_token"] == "restored-token"
+    assert token_result["expires_at"] > int(time.time()) + 60
+    assert fake_st.session_state["outlook_access_token"] == "restored-token"
+    assert fake_st.session_state["outlook_token_expiry"] == token_result["expires_at"]
+    assert fake_st.session_state[graph_auth.SILENT_RESULT_STATE_KEY] == "success"
+    assert app.silent_calls == 1
+    assert app.silent_accounts[0]["home_account_id"] == "home-1"
+    assert app.silent_scopes[0] == config.GRAPH_SCOPES
+    assert fake_st.session_state[graph_auth.USER_STATE_KEY]["username"] == "user@example.com"
+
+
+def test_get_valid_access_token_marks_session_token_used(monkeypatch) -> None:
+    fake_st = FakeStreamlit()
+    _configure_live_auth(monkeypatch, fake_st)
+    fake_st.session_state[graph_auth.TOKEN_STATE_KEY] = {
+        "access_token": "session-token",
+        "scope": "User.Read Mail.Read",
+        "expires_at": int(time.time()) + 3600,
+    }
+
+    assert graph_auth.get_valid_access_token() == "session-token"
+    assert fake_st.session_state[graph_auth.SILENT_RESULT_STATE_KEY] == "session_token_used"
+
+
+def test_silent_failure_requests_sign_in_without_deleting_cache(monkeypatch) -> None:
+    fake_st = FakeStreamlit()
+    app = FakeMsalApp()
+    app.silent_result = {"error": "interaction_required", "error_description": "User interaction required."}
+    _configure_live_auth(monkeypatch, fake_st, app=app)
+    owner = _account_owner()
+    fake_st.session_state[graph_auth.TOKEN_CACHE_OWNER_STATE_KEY] = owner
+    fake_st.session_state[graph_auth.ACCOUNT_HOME_ID_STATE_KEY] = "home-1"
+    database.store_oauth_token_cache(
+        owner,
+        '{"cached": true}',
+        {"home_account_id": "home-1", "username": "user@example.com"},
+        123,
+    )
+
+    try:
+        graph_auth.get_valid_access_token()
+    except RuntimeError as exc:
+        assert "sign in" in str(exc).lower()
+    else:
+        raise AssertionError("get_valid_access_token should require sign-in after interaction_required")
+
+    cache_json, _account = database.load_oauth_token_cache(owner)
+    assert cache_json == '{"cached": true}'
+    assert fake_st.session_state[graph_auth.SILENT_RESULT_STATE_KEY] == "interaction_required"
+
+
+def test_graph_inbox_uses_silently_restored_access_token(monkeypatch) -> None:
+    fake_st = FakeStreamlit()
+    app = FakeMsalApp()
+    _configure_live_auth(monkeypatch, fake_st, app=app)
+    owner = _account_owner()
+    fake_st.session_state[graph_auth.TOKEN_CACHE_OWNER_STATE_KEY] = owner
+    fake_st.session_state[graph_auth.ACCOUNT_HOME_ID_STATE_KEY] = "home-1"
+    fake_st.session_state[graph_auth.TOKEN_STATE_KEY] = {}
+    app.silent_result = {
+        "access_token": "restored-token",
+        "scope": " ".join(config.GRAPH_SCOPES),
+        "expires_in": 3600,
+        "account": dict(app.accounts[0]),
+    }
+    database.store_oauth_token_cache(
+        owner,
+        '{"cached": true}',
+        {"home_account_id": "home-1", "username": "user@example.com"},
+        123,
+    )
+    captured: dict[str, str] = {}
+
+    class OkResponse:
+        status_code = 200
+        reason = "OK"
+        headers = {}
+        text = '{"value":[]}'
+
+        def json(self) -> dict[str, Any]:
+            return {"value": []}
+
+    def fake_get(url, headers, timeout):
+        captured["authorization"] = headers["Authorization"]
+        return OkResponse()
+
+    monkeypatch.setattr(graph_client.requests, "get", fake_get)
+
+    assert graph_client.list_inbox_messages("user-1", limit=10) == []
+    assert captured["authorization"] == "Bearer restored-token"
+    assert app.silent_calls == 1
+    assert fake_st.session_state[graph_auth.SILENT_RESULT_STATE_KEY] == "success"
+
+
 def test_missing_or_expired_token_keeps_persisted_cache(monkeypatch) -> None:
     fake_st = FakeStreamlit()
     empty_app = FakeMsalApp()
@@ -506,7 +629,7 @@ def test_missing_or_expired_token_keeps_persisted_cache(monkeypatch) -> None:
     assert graph_auth.acquire_token_silent_once(clear_on_failure=True) is None
     cache_json, _account = database.load_oauth_token_cache(owner)
     assert cache_json == '{"cached": true}'
-    assert fake_st.session_state[graph_auth.SILENT_RESULT_STATE_KEY] == "no_account"
+    assert fake_st.session_state[graph_auth.SILENT_RESULT_STATE_KEY] == "no_exact_account"
 
 
 def test_account_selection_requires_exact_home_account_id(monkeypatch) -> None:

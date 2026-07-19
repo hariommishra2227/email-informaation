@@ -371,9 +371,9 @@ def _session_token_status(token: str) -> str:
     if token and session_token and token != session_token:
         return "Unknown - request token differs from current session token"
     silent_result = str(auth_diagnostics.get("silent_token_result") or "not_run")
-    if silent_result == "access_token":
+    if silent_result == "success":
         return "Yes - token matches latest session token after silent acquisition"
-    if session_token:
+    if silent_result == "session_token_used" or session_token:
         return "No - current session token used; silent acquisition skipped because session token was usable"
     if silent_result in {"not_run", ""}:
         return "No - silent acquisition has not run"

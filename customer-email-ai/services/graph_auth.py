@@ -260,7 +260,7 @@ def handle_auth_callback() -> bool:
 
 
 def get_valid_access_token() -> str:
-    """Return a usable access token, preferring the fresh Streamlit session token."""
+    """Return a usable access token from session state or the persisted MSAL cache."""
     if config.is_mock_mode():
         return "mock-access-token"
 
@@ -277,6 +277,7 @@ def get_valid_access_token() -> str:
             granted = ", ".join(granted_scopes(token_result)) or "none"
             raise RuntimeError(f"Microsoft token did not include {REQUIRED_MAIL_SCOPE}. Granted scopes: {granted}.")
         LOGGER.info("Using current Streamlit session access token.")
+        _remember_silent_token_result("session_token_used")
         return access_token
 
     silent_token = acquire_token_silent_once(
@@ -298,17 +299,17 @@ def acquire_token_silent_once(force_refresh: bool = False, clear_on_failure: boo
     cache_owner = _authenticated_cache_owner()
     if not cache_owner:
         LOGGER.warning("MSAL silent token acquisition skipped: no authenticated cache owner for this session.")
-        _remember_silent_token_result("no_cache_owner")
+        _remember_silent_token_result("no_exact_account")
         return None
     token_cache, stored_account = _load_msal_token_cache(cache_owner)
     app = _build_msal_app(token_cache)
     account = _select_account(app, stored_account)
     if not account:
         LOGGER.warning("MSAL silent token acquisition skipped: no account found in token cache.")
-        _remember_silent_token_result("no_account")
+        _remember_silent_token_result("no_exact_account")
         return None
 
-    result = _acquire_token_silent(app, account, SILENT_TOKEN_SCOPES, force_refresh=force_refresh)
+    result = _acquire_token_silent(app, account, config.GRAPH_SCOPES, force_refresh=force_refresh)
     _persist_msal_token_cache(token_cache, account, cache_owner)
     if result and "access_token" in result:
         _validate_successful_token_result(result, "silent")
@@ -317,7 +318,7 @@ def acquire_token_silent_once(force_refresh: bool = False, clear_on_failure: boo
         refreshed_account = _account_from_result_or_cache(result, app, account)
         _remember_account_owner(refreshed_account, cache_owner)
         _persist_msal_token_cache(token_cache, refreshed_account, cache_owner)
-        _remember_silent_token_result("access_token")
+        _remember_silent_token_result("success")
         LOGGER.info(
             "MSAL silent token acquisition succeeded for scopes=%s.",
             " ".join(granted_scopes(result)),
@@ -326,14 +327,17 @@ def acquire_token_silent_once(force_refresh: bool = False, clear_on_failure: boo
 
     if result and ("error" in result or "error_description" in result):
         st.session_state[AUTH_ERROR_STATE_KEY] = _format_token_error(result)
-        _remember_silent_token_result(str(result.get("error") or "token_error"))
+        error = str(result.get("error") or "token_error")
+        _remember_silent_token_result(
+            "interaction_required" if error in {"interaction_required", "consent_required", "login_required"} else "msal_error"
+        )
         LOGGER.warning(
             "MSAL silent token acquisition failed: %s",
             _format_token_error(result),
             stack_info=True,
         )
     else:
-        _remember_silent_token_result("no_result")
+        _remember_silent_token_result("interaction_required")
         LOGGER.warning("MSAL silent token acquisition returned no result.", stack_info=True)
     return None
 
@@ -355,6 +359,10 @@ def logout_user(clear_persisted: bool = True) -> None:
     st.session_state[SILENT_RESULT_STATE_KEY] = ""
     st.session_state[TOKEN_CACHE_OWNER_STATE_KEY] = ""
     st.session_state[ACCOUNT_HOME_ID_STATE_KEY] = ""
+    st.session_state["outlook_access_token"] = None
+    st.session_state["outlook_token_expiry"] = None
+    st.session_state["outlook_authenticated_cache_owner"] = None
+    st.session_state["outlook_home_account_id"] = None
     if clear_persisted:
         _clear_persisted_auth(cache_owner)
         _clear_persisted_auth(temporary_owner)
@@ -579,11 +587,14 @@ def _store_token_result(result: dict[str, Any]) -> None:
     else:
         token_result["expires_at"] = int(time.time()) + int(token_result.get("expires_in", 0))
     st.session_state[TOKEN_STATE_KEY] = token_result
+    st.session_state["outlook_access_token"] = access_token
+    st.session_state["outlook_token_expiry"] = token_result["expires_at"]
     if result.get("account"):
         account = _safe_account_metadata(result["account"])
         st.session_state[ACCOUNT_STATE_KEY] = account
         if account.get("home_account_id"):
             st.session_state[ACCOUNT_HOME_ID_STATE_KEY] = account["home_account_id"]
+            st.session_state["outlook_home_account_id"] = account["home_account_id"]
         st.session_state[USER_STATE_KEY] = account
 
 
@@ -594,6 +605,8 @@ def _remember_account_owner(account: dict[str, Any], cache_owner: str) -> None:
     st.session_state[USER_STATE_KEY] = safe_account
     st.session_state[TOKEN_CACHE_OWNER_STATE_KEY] = cache_owner
     st.session_state[ACCOUNT_HOME_ID_STATE_KEY] = str(safe_account.get("home_account_id") or "")
+    st.session_state["outlook_authenticated_cache_owner"] = cache_owner
+    st.session_state["outlook_home_account_id"] = str(safe_account.get("home_account_id") or "")
 
 
 def _delete_temp_cache_if_needed(temporary_owner: str, permanent_owner: str) -> None:
@@ -626,7 +639,11 @@ def _permanent_cache_owner(account: dict[str, Any]) -> str:
 
 def _authenticated_cache_owner() -> str:
     """Return the current session's authenticated cache owner, never the legacy shared owner."""
-    owner = str(st.session_state.get(TOKEN_CACHE_OWNER_STATE_KEY) or "")
+    owner = str(
+        st.session_state.get(TOKEN_CACHE_OWNER_STATE_KEY)
+        or st.session_state.get("outlook_authenticated_cache_owner")
+        or ""
+    )
     if owner == LEGACY_SHARED_CACHE_OWNER:
         return ""
     return owner if owner.startswith("account:") else ""
@@ -819,7 +836,11 @@ def _select_account(app: Any, stored_account: dict[str, Any] | None) -> dict[str
 
 def _authenticated_home_account_id(stored_account: dict[str, Any] | None = None) -> str:
     """Return the current session's authenticated home account id."""
-    session_home_id = str(st.session_state.get(ACCOUNT_HOME_ID_STATE_KEY) or "")
+    session_home_id = str(
+        st.session_state.get(ACCOUNT_HOME_ID_STATE_KEY)
+        or st.session_state.get("outlook_home_account_id")
+        or ""
+    )
     if session_home_id:
         return session_home_id
     account = st.session_state.get(ACCOUNT_STATE_KEY) or {}

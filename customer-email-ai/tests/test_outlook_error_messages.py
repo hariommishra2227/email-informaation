@@ -469,6 +469,34 @@ def test_connection_panel_treats_expired_token_as_sign_in_available(monkeypatch)
     assert ("Disconnect", True) in buttons
 
 
+def test_refresh_session_defaults_do_not_overwrite_auth_keys(monkeypatch) -> None:
+    """Normal Streamlit reruns should preserve Outlook auth state values."""
+    page = _load_outlook_page()
+
+    class FakeStreamlit:
+        session_state = {
+            "outlook_messages_cache": ["cached-message"],
+            "outlook_selected_messages": ["message-1"],
+            "outlook_access_token": "session-token",
+            "outlook_token_expiry": 4102444800,
+            "outlook_authenticated_cache_owner": "account:owner",
+            "outlook_home_account_id": "home-1",
+            "outlook_connected_user": {"username": "user@example.com"},
+        }
+
+    monkeypatch.setattr(page, "st", FakeStreamlit)
+
+    page._ensure_refresh_session_defaults()
+
+    assert FakeStreamlit.session_state["outlook_messages_cache"] == ["cached-message"]
+    assert FakeStreamlit.session_state["outlook_selected_messages"] == ["message-1"]
+    assert FakeStreamlit.session_state["outlook_access_token"] == "session-token"
+    assert FakeStreamlit.session_state["outlook_token_expiry"] == 4102444800
+    assert FakeStreamlit.session_state["outlook_authenticated_cache_owner"] == "account:owner"
+    assert FakeStreamlit.session_state["outlook_home_account_id"] == "home-1"
+    assert FakeStreamlit.session_state["outlook_connected_user"] == {"username": "user@example.com"}
+
+
 def _render_connection_panel_account_metric(monkeypatch, page, account_data: dict[str, str]) -> str:
     """Render the connection panel and return the visible Connected account metric."""
     metrics: dict[str, str] = {}
@@ -556,7 +584,7 @@ def _configure_live_connection_panel(monkeypatch, page, is_connected: bool) -> N
         lambda: {
             "persisted_cache_exists": "Yes" if is_connected else "No",
             "accounts_found": "1" if is_connected else "0",
-            "silent_token_result": "access_token" if is_connected else "not_run",
+            "silent_token_result": "success" if is_connected else "not_run",
             "cache_saved_after_callback": "No",
             "cache_owner": "default_user",
             "stored_account": "Yes" if is_connected else "No",

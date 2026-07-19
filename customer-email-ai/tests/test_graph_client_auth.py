@@ -169,7 +169,7 @@ def test_paginated_inbox_uses_renewed_token_after_first_401(monkeypatch) -> None
     monkeypatch.setattr(graph_client.config, "REDIRECT_URI", "https://example.com/callback")
     monkeypatch.setattr(graph_auth, "get_valid_access_token", lambda: "old-token")
     monkeypatch.setattr(graph_auth, "acquire_token_silent_once", lambda force_refresh=False: "renewed-token")
-    monkeypatch.setattr(graph_auth, "auth_diagnostics", lambda: {"silent_token_result": "access_token"})
+    monkeypatch.setattr(graph_auth, "auth_diagnostics", lambda: {"silent_token_result": "success"})
     monkeypatch.setitem(
         graph_auth.st.session_state,
         graph_auth.TOKEN_STATE_KEY,
@@ -201,7 +201,7 @@ def test_graph_request_diagnostics_decode_safe_access_token_claims(monkeypatch) 
             "iat": 1700000000,
         }
     )
-    monkeypatch.setattr(graph_auth, "auth_diagnostics", lambda: {"silent_token_result": "access_token"})
+    monkeypatch.setattr(graph_auth, "auth_diagnostics", lambda: {"silent_token_result": "success"})
     monkeypatch.setitem(graph_auth.st.session_state, graph_auth.TOKEN_STATE_KEY, {"access_token": token})
 
     diagnostics = graph_client._graph_request_diagnostics(
