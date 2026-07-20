@@ -177,7 +177,6 @@ def _outlook_message_from_graph_item(user_id: str, item: dict[str, Any]) -> Outl
         is_read=bool(item.get("isRead")),
         has_attachments=bool(item.get("hasAttachments")),
         attachment_names=[],
-        internet_message_id=str(item.get("internetMessageId") or ""),
     )
 
 

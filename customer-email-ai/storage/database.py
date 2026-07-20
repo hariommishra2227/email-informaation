@@ -160,9 +160,6 @@ def _initialize_database(db_path: Path | str | None = None) -> None:
                 ON customers(user_id, normalized_mobile);
             CREATE INDEX IF NOT EXISTS idx_customers_user_source_message
                 ON customers(user_id, source_message_id);
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_customers_user_source_message_unique
-                ON customers(user_id, source_message_id)
-                WHERE source_message_id IS NOT NULL AND source_message_id != '';
 
             CREATE TABLE IF NOT EXISTS oauth_auth_flows (
                 flow_id TEXT PRIMARY KEY,
@@ -472,6 +469,14 @@ def create_extraction_job(job_id: str, user_id: str, target_count: int, next_lin
             VALUES (?, ?, ?, ?, 'Pending', ?, ?)""",
             (job_id, user_id, int(target_count), next_link or None, now, now),
         )
+        try:
+            connection.execute(
+                """CREATE UNIQUE INDEX IF NOT EXISTS idx_customers_user_source_message_unique
+                ON customers(user_id, source_message_id)
+                WHERE source_message_id IS NOT NULL AND source_message_id != ''"""
+            )
+        except sqlite3.IntegrityError:
+            LOGGER.warning("Existing duplicate source-message customer rows prevent unique-index migration; application upsert protection remains active.")
 
 
 def get_extraction_job(job_id: str) -> dict[str, Any] | None:
