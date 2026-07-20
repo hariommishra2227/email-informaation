@@ -528,6 +528,18 @@ def list_outlook_message_rows(user_id: str) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
+def list_pending_outlook_messages(user_id: str) -> list[dict[str, Any]]:
+    """Return cached messages that still need extraction after a restart."""
+    with get_connection() as connection:
+        rows = connection.execute(
+            """SELECT * FROM outlook_messages
+            WHERE user_id = ? AND processing_status IN ('Pending', 'Processing', 'Failed')
+            ORDER BY received_datetime ASC""",
+            (user_id,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def customer_duplicate_exists(user_id: str, normalized_email: str, normalized_mobile: str) -> bool:
     """Return whether a customer key already exists for the selected employee."""
     with get_connection() as connection:

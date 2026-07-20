@@ -54,6 +54,25 @@ class LargeMailboxSynchronizer:
         result.status = "Processing"
         next_link = str(job.get("next_link") or "")
 
+        # A checkpoint can be ahead of a page that was already cached before a
+        # process interruption. Drain those cached rows before following the
+        # continuation link so no message is stranded by a restart.
+        for row in database.list_pending_outlook_messages(self.user_id):
+            database.set_message_status(self.user_id, row["message_id"], "Processing")
+            try:
+                body = graph_client.get_message_body(self.user_id, row["message_id"])
+                record = process_outlook_message(self.user_id, OutlookMessage(
+                    message_id=row["message_id"], user_id=self.user_id,
+                    sender_name=row.get("sender_name") or "", sender_email=row.get("sender_email") or "",
+                    subject=row.get("subject") or "", body=body,
+                    received_datetime=row.get("received_datetime") or "", is_read=bool(row.get("is_read")),
+                ))
+                result.processed += 1
+                result.failed += int(record.status == "Failed")
+            except Exception:
+                result.failed += 1
+                database.set_message_status(self.user_id, row["message_id"], "Failed")
+
         def checkpoint(link: str) -> None:
             database.update_extraction_job(self.job_id, next_link=link or None)
 
