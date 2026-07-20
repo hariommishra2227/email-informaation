@@ -139,6 +139,31 @@ def _initialize_database(db_path: Path | str | None = None) -> None:
                 created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS extraction_jobs (
+                job_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                target_count INTEGER NOT NULL,
+                processed_count INTEGER NOT NULL DEFAULT 0,
+                skipped_count INTEGER NOT NULL DEFAULT 0,
+                failed_count INTEGER NOT NULL DEFAULT 0,
+                next_link TEXT,
+                status TEXT NOT NULL DEFAULT 'Pending',
+                started_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_outlook_messages_user_status
+                ON outlook_messages(user_id, processing_status);
+            CREATE INDEX IF NOT EXISTS idx_customers_user_email
+                ON customers(user_id, normalized_email);
+            CREATE INDEX IF NOT EXISTS idx_customers_user_mobile
+                ON customers(user_id, normalized_mobile);
+            CREATE INDEX IF NOT EXISTS idx_customers_user_source_message
+                ON customers(user_id, source_message_id);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_customers_user_source_message_unique
+                ON customers(user_id, source_message_id)
+                WHERE source_message_id IS NOT NULL AND source_message_id != '';
+
             CREATE TABLE IF NOT EXISTS oauth_auth_flows (
                 flow_id TEXT PRIMARY KEY,
                 flow_json TEXT NOT NULL,
@@ -401,6 +426,12 @@ def message_was_imported(user_id: str, message_id: str) -> bool:
 def insert_customer(customer: CustomerRecord) -> int:
     """Insert a customer record and return its local id."""
     with get_connection() as connection:
+        existing = connection.execute(
+            "SELECT id FROM customers WHERE user_id = ? AND source_message_id = ? LIMIT 1",
+            (customer.user_id, customer.source_message_id),
+        ).fetchone() if customer.source_message_id else None
+        if existing:
+            return int(existing["id"])
         cursor = connection.execute(
             """
             INSERT INTO customers (
@@ -429,6 +460,40 @@ def insert_customer(customer: CustomerRecord) -> int:
             ),
         )
     return int(cursor.lastrowid)
+
+
+def create_extraction_job(job_id: str, user_id: str, target_count: int, next_link: str = "") -> None:
+    """Create a resumable mailbox extraction job."""
+    now = utc_now()
+    with get_connection() as connection:
+        connection.execute(
+            """INSERT INTO extraction_jobs
+            (job_id, user_id, target_count, next_link, status, started_at, updated_at)
+            VALUES (?, ?, ?, ?, 'Pending', ?, ?)""",
+            (job_id, user_id, int(target_count), next_link or None, now, now),
+        )
+
+
+def get_extraction_job(job_id: str) -> dict[str, Any] | None:
+    """Return one extraction job checkpoint."""
+    with get_connection() as connection:
+        row = connection.execute("SELECT * FROM extraction_jobs WHERE job_id = ?", (job_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def update_extraction_job(job_id: str, **values: Any) -> None:
+    """Persist only approved extraction-job checkpoint fields."""
+    allowed = {"processed_count", "skipped_count", "failed_count", "next_link", "status"}
+    updates = {key: value for key, value in values.items() if key in allowed}
+    if not updates:
+        return
+    updates["updated_at"] = utc_now()
+    assignments = ", ".join(f"{key} = ?" for key in updates)
+    with get_connection() as connection:
+        connection.execute(
+            f"UPDATE extraction_jobs SET {assignments} WHERE job_id = ?",
+            (*updates.values(), job_id),
+        )
 
 
 def list_customers(user_id: str | None = None) -> list[dict[str, Any]]:

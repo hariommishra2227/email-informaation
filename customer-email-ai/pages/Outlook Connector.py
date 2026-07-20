@@ -21,6 +21,8 @@ try:
     from services.customer_service import get_customers, to_export_rows
     from services.email_processor import process_outlook_message
     from storage import database
+    from sync import MailboxSynchronizer, database_statistics
+    from large_mailbox_sync import LargeMailboxSynchronizer
 except Exception as exc:  # pragma: no cover
     IMPORT_ERROR = exc
 
@@ -61,6 +63,12 @@ def render(user_id: str) -> None:
         st.session_state["selected_outlook_messages"] = []
         st.session_state["outlook_selected_messages"] = []
         return
+
+    try:
+        _render_enterprise_sync(user_id)
+    except Exception as exc:
+        LOGGER.exception("Enterprise mailbox synchronization panel failed.")
+        st.error(_safe_render_exception_message(exc, "Mailbox synchronization"))
 
     st.write("")
     try:
@@ -316,6 +324,77 @@ def _render_quick_actions(user_id: str) -> tuple[bool, bool, bool]:
     with action_cols[3]:
         _render_excel_export(user_id, label="Export Excel")
     return refresh_clicked, import_selected_clicked, import_unread_clicked
+
+
+def _render_enterprise_sync(user_id: str) -> None:
+    """Render persistent mailbox sync status without changing existing inbox actions."""
+    st.subheader("Sync Status")
+    statistics = database_statistics()
+    status_columns = st.columns(3)
+    with status_columns[0]:
+        st.metric("Last Sync Time", statistics.get("last_sync_datetime") or "Never")
+    with status_columns[1]:
+        st.metric("Total Contacts", statistics.get("total_contacts", 0))
+    with status_columns[2]:
+        st.metric("Processed Emails", statistics.get("processed_emails", 0))
+
+    extraction_options = {
+        "Latest 100 new emails": 100,
+        "Latest 500 new emails": 500,
+        "Latest 1,000 new emails": 1000,
+        "Latest 5,000 new emails": 5000,
+        "Process all new emails": 0,
+    }
+    selected = st.selectbox("Large mailbox extraction", list(extraction_options), key="mailbox_extraction_target")
+    if not st.button("Start / Resume Extraction", use_container_width=True):
+        _render_sync_result()
+        return
+
+    progress_bar = st.progress(0)
+
+    def update_progress(processed_count: int, _page_number: int) -> None:
+        # Graph does not provide a reliable mailbox total; approach completion per batch.
+        progress_bar.progress(min(0.95, processed_count / max(processed_count + 100, 1)))
+
+    job_id = st.session_state.get("large_mailbox_job_id")
+    job = LargeMailboxSynchronizer(user_id, extraction_options[selected], job_id=job_id, batch_size=100)
+    st.session_state["large_mailbox_job_id"] = job.job_id
+    result = job.run(progress=lambda current: progress_bar.progress(min(0.99, (current.fetched / max(current.remaining, current.fetched, 1)))))
+    progress_bar.progress(1.0)
+    st.session_state["enterprise_sync_summary"] = {
+        "processed_emails": result.processed,
+        "skipped_emails": result.skipped,
+        "new_contacts": 0,
+        "updated_contacts": 0,
+        "duplicates_removed": 0,
+        "total_processing_time": 0,
+        "fetched": result.fetched,
+        "failed": result.failed,
+        "remaining": max(0, result.remaining - result.fetched) if result.remaining else 0,
+    }
+    _render_sync_result()
+
+
+def _render_sync_result() -> None:
+    """Display the required synchronization performance counters."""
+    summary = st.session_state.get("enterprise_sync_summary")
+    if not summary:
+        return
+    columns = st.columns(6)
+    labels = (
+        ("Processed Emails", "processed_emails"),
+        ("Skipped Emails", "skipped_emails"),
+        ("New Contacts", "new_contacts"),
+        ("Updated Contacts", "updated_contacts"),
+        ("Duplicates Removed", "duplicates_removed"),
+        ("Total Processing Time", "total_processing_time"),
+    )
+    for column, (label, key) in zip(columns, labels):
+        value = summary.get(key, 0)
+        if key == "total_processing_time":
+            value = f"{float(value):.2f}s"
+        with column:
+            st.metric(label, value)
 
 
 def _render_filters() -> tuple[int, str, str, tuple[date, date] | list]:
