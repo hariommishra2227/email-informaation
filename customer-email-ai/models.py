@@ -50,6 +50,36 @@ class CustomerRecord:
     source_message_id: str = ""
     confidence: int = 0
     status: str = "Unique"
+    name_source: str = ""
+    name_confidence: float = 0.0
+    name_evidence: str = ""
+    email_source: str = ""
+    email_confidence: float = 0.0
+    email_evidence: str = ""
+    organisation_source: str = ""
+    organisation_confidence: float = 0.0
+    organisation_evidence: str = ""
+    mobile_source: str = ""
+    mobile_confidence: float = 0.0
+    mobile_evidence: str = ""
+    designation_source: str = ""
+    designation_confidence: float = 0.0
+    designation_evidence: str = ""
+    address_source: str = ""
+    address_confidence: float = 0.0
+    address_evidence: str = ""
+    extraction_method: str = "regex_spacy"
+    llm_used: bool = False
+    llm_model: str = ""
+    llm_error: str = ""
+    review_status: str = "Needs Review"
+    reviewed_at: str = ""
+    reviewed_by: str = ""
+    correction_notes: str = ""
+    internet_message_id: str = ""
+    sender_email: str = ""
+    sender_domain: str = ""
+    processed_at: str = ""
 
     def to_legacy_dict(self) -> dict[str, Any]:
         """Return the existing app/export field names for compatibility."""

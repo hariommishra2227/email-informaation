@@ -87,7 +87,7 @@ def list_inbox_messages(
     token = graph_auth.get_valid_access_token()
     LOGGER.info("Calling Microsoft Graph inbox endpoint with limit=%s.", limit)
     next_url = (
-        f"{GRAPH_BASE_URL}/me/messages"
+        f"{GRAPH_BASE_URL}/me/mailFolders/inbox/messages"
         "?$select=id,internetMessageId,subject,from,receivedDateTime,bodyPreview,body,isRead,hasAttachments,webLink"
         "&$orderby=receivedDateTime desc&$top=50"
     )
@@ -107,6 +107,9 @@ def list_inbox_messages(
                 LOGGER.warning("Graph message without id was skipped.")
                 continue
             sender = (item.get("from") or {}).get("emailAddress", {}) or {}
+            if config.is_internal_sender(str(sender.get("address") or "")):
+                LOGGER.info("Skipping internal Outlook message before body extraction message_id=%s.", message_id)
+                continue
             body_info = item.get("body") or {}
             body = _body_to_text(str(body_info.get("content", "")), str(body_info.get("contentType", "")))
             messages.append(
@@ -154,7 +157,7 @@ def iter_mailbox_message_pages(
     token = graph_auth.get_valid_access_token()
     # Bodies are fetched one message at a time by the large-mailbox worker.
     select = "id,internetMessageId,subject,from,receivedDateTime,bodyPreview,isRead,hasAttachments"
-    next_url = start_next_link or f"{GRAPH_BASE_URL}/me/messages?$select={select}&$orderby=receivedDateTime%20asc&$top={page_size}"
+    next_url = start_next_link or f"{GRAPH_BASE_URL}/me/mailFolders/inbox/messages?$select={select}&$orderby=receivedDateTime%20asc&$top={page_size}"
     if received_after:
         graph_filter = f"receivedDateTime ge {received_after}"
         if received_before:
@@ -185,6 +188,9 @@ def _outlook_message_from_graph_item(user_id: str, item: dict[str, Any]) -> Outl
         LOGGER.warning("Graph message without id was skipped.")
         return None
     sender = (item.get("from") or {}).get("emailAddress", {}) or {}
+    if config.is_internal_sender(str(sender.get("address") or "")):
+        LOGGER.info("Skipping internal Outlook message before body extraction message_id=%s.", message_id)
+        return None
     body_info = item.get("body") or {}
     return OutlookMessage(
         message_id=message_id,

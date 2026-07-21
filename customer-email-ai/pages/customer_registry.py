@@ -11,6 +11,7 @@ IMPORT_ERROR: Exception | None = None
 try:
     from excel_exporter import EXCEL_FILE_NAME, export_customers_to_excel
     from services.customer_service import get_customers, to_export_rows
+    from storage import database
 except Exception as exc:  # pragma: no cover
     IMPORT_ERROR = exc
 
@@ -42,12 +43,12 @@ def render(user_id: str) -> None:
     with controls[0]:
         search = st.text_input("Search", "")
     with controls[1]:
-        status_filter = st.selectbox("Status filter", ["All", "Unique", "Duplicate", "Incomplete", "Failed"])
+        status_filter = st.selectbox("Review status", ["All", "Approved", "Needs Review", "Rejected"])
     with controls[2]:
         source_filter = st.selectbox("Source filter", ["All", "Outlook", "PDF", "TXT", "Manual"])
 
     if status_filter != "All":
-        rows = [row for row in rows if row.get("status") == status_filter]
+        rows = [row for row in rows if row.get("review_status", "Needs Review") == status_filter]
     if source_filter != "All":
         rows = [row for row in rows if row.get("source") == source_filter]
     if search.strip():
@@ -61,6 +62,30 @@ def render(user_id: str) -> None:
     display = pd.DataFrame(rows)
     display = display[[column for column in DISPLAY_COLUMNS if column in display.columns]].rename(columns=DISPLAY_COLUMNS)
     st.dataframe(display, hide_index=True, use_container_width=True)
+
+    st.subheader("Review Queue")
+    for row in rows:
+        with st.expander(f"#{row['id']} — {row.get('contact_name') or 'Unnamed'} — {row.get('review_status', 'Needs Review')}"):
+            st.write({field: {"value": row.get(value, ""), "source": row.get(source, ""), "confidence": row.get(confidence, 0), "evidence": row.get(evidence, "")} for field, value, source, confidence, evidence in (
+                ("name", "contact_name", "name_source", "name_confidence", "name_evidence"),
+                ("email", "email", "email_source", "email_confidence", "email_evidence"),
+                ("organisation", "organisation", "organisation_source", "organisation_confidence", "organisation_evidence"),
+                ("mobile", "mobile", "mobile_source", "mobile_confidence", "mobile_evidence"),
+                ("designation", "designation", "designation_source", "designation_confidence", "designation_evidence"),
+                ("address", "address", "address_source", "address_confidence", "address_evidence"),
+            )})
+            with st.form(f"review_{row['id']}"):
+                values = {field: st.text_input(label, value=str(row.get(column) or "")) for field, label, column in (
+                    ("contact_name", "Customer name", "contact_name"), ("email", "Email", "email"),
+                    ("organisation", "Organisation", "organisation"), ("mobile", "Mobile", "mobile"),
+                    ("designation", "Designation", "designation"), ("address", "Address", "address"))}
+                review_status = st.selectbox("Decision", ["Approved", "Needs Review", "Rejected"], index=["Approved", "Needs Review", "Rejected"].index(row.get("review_status", "Needs Review")))
+                notes = st.text_area("Correction notes", value=str(row.get("correction_notes") or ""))
+                if st.form_submit_button("Save review"):
+                    values["review_status"] = review_status
+                    database.update_customer_review(int(row["id"]), values, reviewed_by=user_id, notes=notes)
+                    st.success("Review saved with audit history.")
+                    st.rerun()
 
     export_rows = to_export_rows(rows)
     csv_buffer = StringIO()

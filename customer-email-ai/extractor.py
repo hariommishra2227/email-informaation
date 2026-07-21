@@ -11,6 +11,8 @@ import re
 from html import unescape
 from typing import Any
 
+import config
+
 try:
     import phonenumbers
 except ImportError:  # pragma: no cover
@@ -133,6 +135,38 @@ DESIGNATION_KEYWORDS: dict[str, str] = {
     "cto": "CTO",
     "cio": "CIO",
 }
+
+
+def _valid_email(value: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", str(value or "").strip()))
+
+
+def _automated_email(value: str) -> bool:
+    local = str(value or "").split("@", 1)[0].lower()
+    return local in {"no-reply", "noreply", "donotreply", "mailer-daemon"} or local.startswith(("no-reply", "noreply", "donotreply"))
+
+
+def select_customer_email(
+    graph_sender_email: str = "",
+    forwarded_sender_email: str = "",
+    signature_email: str = "",
+    body_emails: list[str] | None = None,
+) -> dict[str, Any]:
+    """Select one external customer email while preserving source priority."""
+    candidates = (
+        (graph_sender_email, "graph_sender", 1.0),
+        (forwarded_sender_email, "forwarded_sender", 0.95),
+        (signature_email, "signature", 0.90),
+    )
+    for value, source, confidence in candidates:
+        value = str(value or "").strip()
+        if _valid_email(value) and not config.is_internal_email(value) and not _automated_email(value):
+            return {"email": value, "email_source": source, "email_confidence": confidence}
+    for value in dict.fromkeys(body_emails or []):
+        value = str(value).strip()
+        if _valid_email(value) and not config.is_internal_email(value) and not _automated_email(value):
+            return {"email": value, "email_source": "body", "email_confidence": 0.40}
+    return {"email": "", "email_source": "", "email_confidence": 0.0}
 
 
 class EmailExtractionEngine:
@@ -503,8 +537,9 @@ class EmailExtractionEngine:
                     address_candidates.append(line)
 
             for candidate in address_candidates:
-                if self._valid_postal_address(candidate):
-                    return self._clean_text(candidate)
+                address_value = candidate.split(":", 1)[1].strip() if ":" in candidate else candidate
+                if self._valid_postal_address(address_value):
+                    return self._clean_text(address_value)
             return ""
         except Exception as exc:
             LOGGER.exception("Address extraction failed: %s", exc)
@@ -542,13 +577,14 @@ class EmailExtractionEngine:
             LOGGER.exception("Designation extraction failed: %s", exc)
             return ""
 
-    def extract(self, email_text: str) -> dict[str, str]:
+    def extract(self, email_text: str, *, graph_sender_email: str = "", graph_sender_name: str = "") -> dict[str, Any]:
         """Run the full extraction pipeline and return the requested JSON schema."""
         try:
             cleaned_text = "\n".join(line for line in self.clean_html(email_text).splitlines() if not self._is_boilerplate(line))
             email_list = self.extract_email_addresses(cleaned_text)
+            selected_email = select_customer_email(graph_sender_email=graph_sender_email, body_emails=email_list)
             mobile_numbers = self.extract_mobile_numbers(cleaned_text)
-            contact_name = self.extract_contact_person_name(cleaned_text)
+            contact_name = graph_sender_name.strip() if graph_sender_name.strip() else self.extract_contact_person_name(cleaned_text)
             organisation_name = self.extract_organisation_name(cleaned_text)
             address = self.extract_address(cleaned_text)
             designation = self.extract_designation(cleaned_text)
@@ -558,8 +594,10 @@ class EmailExtractionEngine:
                 "contact_person_name": contact_name,
                 "customer_name": contact_name,
                 "name": contact_name,
-                "email_id": email_list[0] if email_list else "",
-                "email": email_list[0] if email_list else "",
+                "email_id": selected_email["email"],
+                "email": selected_email["email"],
+                "email_source": selected_email["email_source"],
+                "email_confidence": selected_email["email_confidence"],
                 "organisation_name": organisation_name,
                 "company": organisation_name,
                 "mobile_number": mobile_numbers[0] if mobile_numbers else "",
@@ -568,6 +606,8 @@ class EmailExtractionEngine:
                 "address": address,
                 "designation": designation,
                 "subject": subject,
+                "name_source": "graph_sender" if graph_sender_name.strip() else ("body" if contact_name else ""),
+                "name_confidence": 0.95 if graph_sender_name.strip() else (0.45 if contact_name else 0.0),
             }
             LOGGER.info("Extraction complete for %d characters of email content.", len(cleaned_text))
             return result
@@ -579,6 +619,8 @@ class EmailExtractionEngine:
                 "name": "",
                 "email_id": "",
                 "email": "",
+                "email_source": "",
+                "email_confidence": 0.0,
                 "organisation_name": "",
                 "company": "",
                 "mobile_number": "",
@@ -587,6 +629,8 @@ class EmailExtractionEngine:
                 "address": "",
                 "designation": "",
                 "subject": "",
+                "name_source": "",
+                "name_confidence": 0.0,
             }
 
 
