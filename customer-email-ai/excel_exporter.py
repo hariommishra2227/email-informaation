@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from io import BytesIO
 from typing import Any
+import math
 
 import pandas as pd
 from openpyxl.styles import Font, PatternFill
@@ -40,12 +41,21 @@ def _build_export_rows(customers: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for customer in customers:
         rows.append(
             {
-                column_name: customer.get(source_key, "")
+                column_name: _excel_value(customer.get(source_key, ""))
                 for source_key, column_name in COLUMN_MAPPING.items()
             }
         )
 
     return rows
+
+
+def _excel_value(value: Any) -> Any:
+    """Keep missing values empty so Excel receives a blank cell."""
+    if value is None:
+        return ""
+    if isinstance(value, float) and math.isnan(value):
+        return ""
+    return value
 
 
 def _auto_adjust_column_widths(worksheet: Any) -> None:
