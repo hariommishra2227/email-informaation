@@ -32,11 +32,13 @@ class JobProgress:
 class LargeMailboxSynchronizer:
     """Process one Graph page at a time and persist a restart checkpoint."""
 
-    def __init__(self, user_id: str, target_count: int, job_id: str | None = None, batch_size: int = 100) -> None:
+    def __init__(self, user_id: str, target_count: int = 1000, job_id: str | None = None, batch_size: int = 100, received_after: str | None = None, received_before: str | None = None) -> None:
         self.user_id = user_id
         self.target_count = max(0, int(target_count))
         self.job_id = job_id or str(uuid4())
         self.batch_size = max(1, int(batch_size))
+        self.received_after = received_after
+        self.received_before = received_before
 
     def run(self, progress: Callable[[JobProgress], None] | None = None, pause: Callable[[], bool] | None = None) -> JobProgress:
         database.initialize_database()
@@ -47,9 +49,7 @@ class LargeMailboxSynchronizer:
         processed = int(job.get("processed_count", 0))
         skipped = int(job.get("skipped_count", 0))
         failed = int(job.get("failed_count", 0))
-        result = JobProgress(self.job_id, processed + skipped + failed, processed, skipped, failed, self.target_count, str(job.get("status", "Pending")))
-        if result.status == "Completed":
-            return result
+        result = JobProgress(self.job_id, 0, processed, skipped, failed, self.target_count, str(job.get("status", "Pending")))
         database.update_extraction_job(self.job_id, status="Processing")
         result.status = "Processing"
         next_link = str(job.get("next_link") or "")
@@ -74,12 +74,16 @@ class LargeMailboxSynchronizer:
                 database.set_message_status(self.user_id, row["message_id"], "Failed")
 
         def checkpoint(link: str) -> None:
+            nonlocal next_link
+            next_link = link or ""
             database.update_extraction_job(self.job_id, next_link=link or None)
 
         try:
             pages = graph_client.iter_mailbox_message_pages(
                 self.user_id,
                 page_size=50,
+                received_after=self.received_after,
+                received_before=self.received_before,
                 start_next_link=next_link or None,
                 checkpoint=checkpoint,
             )
@@ -118,7 +122,7 @@ class LargeMailboxSynchronizer:
                     progress(result)
                 if self.target_count and result.fetched >= self.target_count:
                     break
-            result.status = "Completed"
+            result.status = "Paused" if self.target_count and result.fetched >= self.target_count and next_link else "Completed"
             self._save(result)
             return result
         except Exception:
