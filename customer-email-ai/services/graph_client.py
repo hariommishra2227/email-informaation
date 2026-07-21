@@ -68,11 +68,21 @@ def get_current_user(user_id: str | None = None) -> dict[str, Any]:
     return _graph_get(f"{GRAPH_BASE_URL}/me", token)
 
 
-def list_inbox_messages(user_id: str, limit: int = 50) -> list[OutlookMessage]:
+def list_inbox_messages(
+    user_id: str,
+    limit: int = 50,
+    received_after: str | None = None,
+    received_before: str | None = None,
+) -> list[OutlookMessage]:
     """Return Outlook inbox messages without marking them read."""
     limit = max(1, int(limit or 50))
     if config.is_mock_mode():
-        return list_mock_messages(user_id, limit=limit)
+        messages = list_mock_messages(user_id, limit=limit)
+        if received_after:
+            messages = [message for message in messages if message.received_datetime >= received_after]
+        if received_before:
+            messages = [message for message in messages if message.received_datetime < received_before]
+        return messages
 
     token = graph_auth.get_valid_access_token()
     LOGGER.info("Calling Microsoft Graph inbox endpoint with limit=%s.", limit)
@@ -81,6 +91,11 @@ def list_inbox_messages(user_id: str, limit: int = 50) -> list[OutlookMessage]:
         "?$select=id,internetMessageId,subject,from,receivedDateTime,bodyPreview,body,isRead,hasAttachments,webLink"
         "&$orderby=receivedDateTime desc&$top=50"
     )
+    if received_after:
+        filter_expression = f"receivedDateTime ge {received_after}"
+        if received_before:
+            filter_expression += f" and receivedDateTime lt {received_before}"
+        next_url += f"&$filter={quote(filter_expression, safe='-:TZ.') }"
     messages: list[OutlookMessage] = []
     while next_url and len(messages) < limit:
         payload, token = _graph_get_with_token(next_url, token)
@@ -178,8 +193,6 @@ def _outlook_message_from_graph_item(user_id: str, item: dict[str, Any]) -> Outl
         has_attachments=bool(item.get("hasAttachments")),
         attachment_names=[],
     )
-
-
 def get_message_body(user_id: str, message_id: str) -> str:
     """Return one Outlook message body."""
     if config.is_mock_mode():
