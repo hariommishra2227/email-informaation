@@ -132,6 +132,7 @@ def list_inbox_messages(
 def iter_mailbox_message_pages(
     user_id: str,
     received_after: str | None = None,
+    received_before: str | None = None,
     page_size: int = GRAPH_PAGE_SIZE,
     start_next_link: str | None = None,
     checkpoint: Any | None = None,
@@ -143,7 +144,9 @@ def iter_mailbox_message_pages(
     if config.is_mock_mode():
         messages = list_mock_messages(user_id, limit=10_000_000)
         if received_after:
-            messages = [message for message in messages if message.received_datetime > received_after]
+            messages = [message for message in messages if message.received_datetime >= received_after]
+        if received_before:
+            messages = [message for message in messages if message.received_datetime < received_before]
         for offset in range(0, len(messages), page_size):
             yield messages[offset : offset + page_size]
         return
@@ -153,7 +156,10 @@ def iter_mailbox_message_pages(
     select = "id,internetMessageId,subject,from,receivedDateTime,bodyPreview,isRead,hasAttachments"
     next_url = start_next_link or f"{GRAPH_BASE_URL}/me/messages?$select={select}&$orderby=receivedDateTime%20asc&$top={page_size}"
     if received_after:
-        graph_filter = quote(f"receivedDateTime gt {received_after}", safe="-:TZ.")
+        graph_filter = f"receivedDateTime ge {received_after}"
+        if received_before:
+            graph_filter += f" and receivedDateTime lt {received_before}"
+        graph_filter = quote(graph_filter, safe="-:TZ.")
         next_url += f"&$filter={graph_filter}"
 
     LOGGER.info("Streaming complete Microsoft Graph mailbox after=%s page_size=%s.", received_after, page_size)

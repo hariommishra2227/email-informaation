@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import traceback
 from urllib.parse import urlparse
+from uuid import NAMESPACE_URL, uuid5
 
 import pandas as pd
 import streamlit as st
@@ -64,12 +65,6 @@ def render(user_id: str) -> None:
         st.session_state["outlook_selected_messages"] = []
         return
 
-    try:
-        _render_enterprise_sync(user_id)
-    except Exception as exc:
-        LOGGER.exception("Enterprise mailbox synchronization panel failed.")
-        st.error(_safe_render_exception_message(exc, "Mailbox synchronization"))
-
     st.write("")
     try:
         limit, search_text, read_filter, date_range, received_after, received_before = _render_filters()
@@ -78,67 +73,11 @@ def render(user_id: str) -> None:
         st.error(_safe_render_exception_message(exc, "Outlook filters"))
         return
 
-    st.write("")
     try:
-        refresh_clicked, import_selected_clicked, import_unread_clicked = _render_quick_actions(user_id)
+        _render_enterprise_sync(user_id, received_after, received_before)
     except Exception as exc:
-        LOGGER.exception("Outlook quick actions failed to render.")
-        st.error(_safe_render_exception_message(exc, "Outlook quick actions"))
-        return
-
-    cached_messages = st.session_state.get("outlook_messages_cache", [])
-    if can_load_inbox and (refresh_clicked or not cached_messages):
-        try:
-            messages = graph_client.list_inbox_messages(
-                user_id,
-                limit=int(limit),
-                received_after=received_after,
-                received_before=received_before,
-            )
-            st.session_state["outlook_messages_cache"] = messages
-        except Exception as exc:
-            LOGGER.exception("Outlook inbox refresh failed.")
-            st.error(_friendly_exception_message(exc))
-            messages = st.session_state.get("outlook_messages_cache", [])[: int(limit)]
-    else:
-        messages = cached_messages[: int(limit)]
-
-    for message in messages:
-        try:
-            database.upsert_outlook_message(message)
-        except Exception:
-            LOGGER.exception("Could not cache Outlook message metadata.")
-
-    try:
-        status_rows = {
-            row["message_id"]: row["processing_status"]
-            for row in database.list_outlook_message_rows(user_id)
-        }
-    except Exception as exc:
-        LOGGER.exception("Could not read Outlook message status rows.")
-        st.error(_safe_render_exception_message(exc, "Outlook message status"))
-        return
-
-    try:
-        filtered = _filter_messages(messages, search_text, read_filter, date_range)
-        selected_ids = _render_inbox_list(filtered, status_rows)
-    except Exception as exc:
-        LOGGER.exception("Outlook inbox list failed to render.")
-        st.error(_safe_render_exception_message(exc, "Outlook inbox list"))
-        return
-
-    if import_selected_clicked:
-        _import_messages(user_id, messages, selected_ids)
-    if import_unread_clicked:
-        _import_messages(user_id, messages, [message.message_id for message in messages if not message.is_read])
-
-    _render_import_result()
-    st.write("")
-    try:
-        _render_customer_preview(user_id)
-    except Exception as exc:
-        LOGGER.exception("Outlook customer preview failed to render.")
-        st.error(_safe_render_exception_message(exc, "Outlook customer preview"))
+        LOGGER.exception("Enterprise mailbox synchronization panel failed.")
+        st.error(_safe_render_exception_message(exc, "Mailbox synchronization"))
 
 
 def _render_connection_panel() -> bool:
@@ -331,7 +270,7 @@ def _render_quick_actions(user_id: str) -> tuple[bool, bool, bool]:
     return refresh_clicked, import_selected_clicked, import_unread_clicked
 
 
-def _render_enterprise_sync(user_id: str) -> None:
+def _render_enterprise_sync(user_id: str, received_after: str | None, received_before: str | None) -> None:
     """Render persistent mailbox sync status without changing existing inbox actions."""
     st.subheader("Sync Status")
     statistics = database_statistics()
@@ -343,28 +282,20 @@ def _render_enterprise_sync(user_id: str) -> None:
     with status_columns[2]:
         st.metric("Processed Emails", statistics.get("processed_emails", 0))
 
-    extraction_options = {
-        "Latest 100 new emails": 100,
-        "Latest 500 new emails": 500,
-        "Latest 1,000 new emails": 1000,
-        "Latest 5,000 new emails": 5000,
-        "Process all new emails": 0,
-    }
-    selected = st.selectbox("Large mailbox extraction", list(extraction_options), key="mailbox_extraction_target")
-    if not st.button("Start / Resume Extraction", use_container_width=True):
+    select_all = st.checkbox("Select All Emails", key="select_all_outlook_emails")
+    if not st.button("Extract Selected Emails", use_container_width=True):
         _render_sync_result()
+        return
+    if not select_all:
+        st.warning("Enable Select All Emails before extraction.")
         return
 
     progress_bar = st.progress(0)
 
-    def update_progress(processed_count: int, _page_number: int) -> None:
-        # Graph does not provide a reliable mailbox total; approach completion per batch.
-        progress_bar.progress(min(0.95, processed_count / max(processed_count + 100, 1)))
-
-    job_id = st.session_state.get("large_mailbox_job_id")
-    job = LargeMailboxSynchronizer(user_id, extraction_options[selected], job_id=job_id, batch_size=100)
+    job_id = str(uuid5(NAMESPACE_URL, f"outlook:{user_id}:{received_after or ''}:{received_before or ''}"))
+    job = LargeMailboxSynchronizer(user_id, 1000, job_id=job_id, batch_size=100, received_after=received_after, received_before=received_before)
     st.session_state["large_mailbox_job_id"] = job.job_id
-    result = job.run(progress=lambda current: progress_bar.progress(min(0.99, (current.fetched / max(current.remaining, current.fetched, 1)))))
+    result = job.run(progress=lambda current: progress_bar.progress(min(0.99, current.fetched / max(1000, current.fetched))))
     progress_bar.progress(1.0)
     st.session_state["enterprise_sync_summary"] = {
         "processed_emails": result.processed,
@@ -376,8 +307,11 @@ def _render_enterprise_sync(user_id: str) -> None:
         "fetched": result.fetched,
         "failed": result.failed,
         "remaining": max(0, result.remaining - result.fetched) if result.remaining else 0,
+        "more_remaining": result.status == "Paused",
     }
     _render_sync_result()
+    if result.status == "Paused":
+        st.info("More matching emails remain. Run extraction again to continue.")
 
 
 def _render_sync_result() -> None:
@@ -403,19 +337,7 @@ def _render_sync_result() -> None:
 
 
 def _render_filters() -> tuple[int, str, str, tuple[date, date] | list, str | None, str | None]:
-    """Render simple visible filters and advanced options."""
-    st.subheader("Simple Filters")
-    filter_cols = st.columns([0.68, 0.32])
-    with filter_cols[0]:
-        search_text = st.text_input("Search sender or subject", "")
-    with filter_cols[1]:
-        read_filter = st.selectbox("Email status", ["All", "Unread", "Read"])
-    with st.expander("Advanced Filters"):
-        advanced_cols = st.columns([0.5, 0.5])
-        with advanced_cols[0]:
-            date_range = st.date_input("Date range", value=[])
-        with advanced_cols[1]:
-            limit = st.number_input("Maximum emails", min_value=1, max_value=1000, value=50, step=25)
+    """Render the existing date controls used by mailbox extraction."""
     st.subheader("Email Date Filter")
     date_filter = st.radio(
         "Fetch emails received",
@@ -436,7 +358,7 @@ def _render_filters() -> tuple[int, str, str, tuple[date, date] | list, str | No
         start_date = date.today() - timedelta(days=days - 1)
         received_after = datetime.combine(start_date, datetime.min.time(), tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
         received_before = datetime.combine(date.today() + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
-    return int(limit), search_text, read_filter, date_range, received_after, received_before
+    return 1000, "", "All", [], received_after, received_before
 
 
 def _filter_messages(messages: list, search_text: str, read_filter: str, date_range: tuple[date, date] | list) -> list:
