@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 try:
@@ -14,6 +15,68 @@ except ImportError:  # pragma: no cover
 
 
 load_dotenv()
+
+# Customer extraction must treat these as internal data, regardless of case or punctuation.
+INTERNAL_DOMAINS = {"itsipl.com"}
+INTERNAL_COMPANY_ALIASES = {
+    "ITSIPL",
+    "I.T. Solutions India Pvt. Ltd.",
+    "I T Solutions India Pvt Ltd",
+    "IT Solutions India Pvt Ltd",
+    "I.T. Solutions India Private Limited",
+    "IT Solutions India Private Limited",
+    "I. T. Solutions India Pvt. Limited",
+    "I.T Solutions India",
+    "IT Solutions India",
+}
+INTERNAL_EMAILS: set[str] = set()
+INTERNAL_PHONE_NUMBERS: set[str] = set()
+INTERNAL_ADDRESS_MARKERS = {"itsipl", "i.t. solutions india", "it solutions india"}
+
+
+def normalize_email(value: str) -> str:
+    """Normalize an email address for validation and comparisons."""
+    return str(value or "").strip().lower()
+
+
+def get_email_domain(value: str) -> str:
+    """Return the lower-case domain portion of an email address."""
+    email = normalize_email(value)
+    return email.rsplit("@", 1)[1] if "@" in email else ""
+
+
+def get_graph_sender(message: dict) -> tuple[str, str]:
+    """Read the authoritative sender name/address from a Graph message payload."""
+    sender = ((message or {}).get("from") or {}).get("emailAddress") or {}
+    return str(sender.get("name") or "").strip(), normalize_email(str(sender.get("address") or ""))
+
+
+def is_internal_email(value: str) -> bool:
+    """Return true only for an exact internal domain or configured address."""
+    email = normalize_email(value)
+    return bool(email and (email in {normalize_email(item) for item in INTERNAL_EMAILS} or get_email_domain(email) in INTERNAL_DOMAINS))
+
+
+def normalize_company_text(value: str) -> str:
+    """Normalize company punctuation and common Pvt/Ltd variants."""
+    normalized = re.sub(r"[^a-z0-9]+", " ", str(value or "").lower())
+    normalized = re.sub(r"\b(private|pvt)\b", "private", normalized)
+    normalized = re.sub(r"\b(limited|ltd)\b", "limited", normalized)
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
+_NORMALIZED_INTERNAL_COMPANIES = {normalize_company_text(value) for value in INTERNAL_COMPANY_ALIASES}
+
+
+def is_internal_company(value: str) -> bool:
+    """Return true when a company value matches a configured internal alias."""
+    normalized = normalize_company_text(value)
+    return bool(normalized and (normalized in _NORMALIZED_INTERNAL_COMPANIES or "itsipl" in normalized))
+
+
+def is_internal_sender(sender_email: str) -> bool:
+    """Alias for the message-level sender decision."""
+    return is_internal_email(sender_email)
 
 try:
     import streamlit as st

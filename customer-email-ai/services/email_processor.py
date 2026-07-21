@@ -12,6 +12,7 @@ from duplicate_detector import normalize_email, normalize_mobile
 from extractor import EmailExtractionEngine
 from models import CustomerRecord, OutlookMessage
 from storage import database
+import config
 
 
 LOGGER = logging.getLogger(__name__)
@@ -74,7 +75,11 @@ def build_customer_record(
     """Extract and normalize one customer record from text."""
     extractor = engine or EmailExtractionEngine()
     cleaned_text = clean_html_to_text(text)
-    extracted = extractor.extract(cleaned_text)
+    extracted = extractor.extract(
+        cleaned_text,
+        graph_sender_email=sender_email,
+        graph_sender_name=sender_name,
+    )
 
     email = str(extracted.get("email_id") or extracted.get("email") or "").strip()
     if not email and _looks_like_valid_email(sender_email) and not sender_email.lower().endswith("@" + INTERNAL_DOMAIN):
@@ -93,6 +98,8 @@ def build_customer_record(
         "address": str(extracted.get("address") or "").strip(),
         "subject": subject or str(extracted.get("subject") or "").strip(),
     }
+    if config.is_internal_company(customer_values["organisation"]):
+        customer_values["organisation"] = ""
     normalized_email = normalize_email(customer_values["email"])
     normalized_mobile = normalize_mobile(customer_values["mobile"])
     confidence = calculate_confidence(customer_values)
@@ -123,6 +130,17 @@ def process_outlook_message(
 ) -> CustomerRecord:
     """Import one Outlook message once and save its extracted customer record."""
     database.ensure_user(user_id)
+    if config.is_internal_sender(message.sender_email):
+        LOGGER.info("Skipping internal sender before extraction message_id=%s.", message.message_id)
+        database.write_processing_log(user_id, message.message_id, "INFO", "Internal sender skipped", "internal_sender")
+        return CustomerRecord(
+            user_id=user_id,
+            source="Outlook",
+            source_message_id=message.message_id,
+            subject=message.subject,
+            status="Skipped Internal",
+        )
+
     database.upsert_outlook_message(message)
 
     if database.message_was_imported(user_id, message.message_id):
