@@ -5,9 +5,22 @@ from __future__ import annotations
 import sys
 from types import SimpleNamespace
 
+
+class SessionStateMock(dict):
+    """Dictionary-compatible Streamlit session-state test double."""
+
+    def __getattr__(self, name):
+        try:
+            return self[name]
+        except KeyError as exc:
+            raise AttributeError(name) from exc
+
+    def __setattr__(self, name, value):
+        self[name] = value
+
 streamlit_stub = SimpleNamespace(
     cache_resource=lambda function=None, **_: function if function is not None else (lambda wrapped: wrapped),
-    session_state=SimpleNamespace(),
+    session_state=SessionStateMock(),
 )
 sys.modules.setdefault("streamlit", streamlit_stub)
 
@@ -40,7 +53,7 @@ def test_extraction_confidence_uses_weighted_fields() -> None:
 
 def test_pdf_upload_does_not_touch_manual_text_and_runs_once(monkeypatch) -> None:
     """PDF processing should not copy text into the manual textarea or rerun the same PDF."""
-    session_state = SimpleNamespace(
+    session_state = SessionStateMock(
         email_text="",
         pdf_preview_text="",
         processed_pdf_signatures=[],

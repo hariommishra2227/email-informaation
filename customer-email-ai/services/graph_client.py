@@ -9,6 +9,7 @@ import json
 import re
 import time
 from typing import Any
+from urllib.parse import quote
 
 import requests
 
@@ -22,6 +23,8 @@ from services.outlook_email_service import get_mock_message, list_mock_messages
 LOGGER = logging.getLogger(__name__)
 GRAPH_BASE_URL = "https://graph.microsoft.com/v1.0"
 REQUEST_TIMEOUT_SECONDS = 20
+GRAPH_PAGE_SIZE = 50
+RETRYABLE_GRAPH_STATUS_CODES = {429, 500, 502, 503, 504}
 LAST_GRAPH_REQUEST_DIAGNOSTIC: dict[str, str] = {}
 
 
@@ -65,19 +68,34 @@ def get_current_user(user_id: str | None = None) -> dict[str, Any]:
     return _graph_get(f"{GRAPH_BASE_URL}/me", token)
 
 
-def list_inbox_messages(user_id: str, limit: int = 50) -> list[OutlookMessage]:
+def list_inbox_messages(
+    user_id: str,
+    limit: int = 50,
+    received_after: str | None = None,
+    received_before: str | None = None,
+) -> list[OutlookMessage]:
     """Return Outlook inbox messages without marking them read."""
     limit = max(1, int(limit or 50))
     if config.is_mock_mode():
-        return list_mock_messages(user_id, limit=limit)
+        messages = list_mock_messages(user_id, limit=limit)
+        if received_after:
+            messages = [message for message in messages if message.received_datetime >= received_after]
+        if received_before:
+            messages = [message for message in messages if message.received_datetime < received_before]
+        return messages
 
     token = graph_auth.get_valid_access_token()
     LOGGER.info("Calling Microsoft Graph inbox endpoint with limit=%s.", limit)
     next_url = (
         f"{GRAPH_BASE_URL}/me/messages"
-        "?$select=id,subject,from,receivedDateTime,bodyPreview,body,isRead,hasAttachments,webLink"
+        "?$select=id,internetMessageId,subject,from,receivedDateTime,bodyPreview,body,isRead,hasAttachments,webLink"
         "&$orderby=receivedDateTime desc&$top=50"
     )
+    if received_after:
+        filter_expression = f"receivedDateTime ge {received_after}"
+        if received_before:
+            filter_expression += f" and receivedDateTime lt {received_before}"
+        next_url += f"&$filter={quote(filter_expression, safe='-:TZ.') }"
     messages: list[OutlookMessage] = []
     while next_url and len(messages) < limit:
         payload, token = _graph_get_with_token(next_url, token)
@@ -104,12 +122,77 @@ def list_inbox_messages(user_id: str, limit: int = 50) -> list[OutlookMessage]:
                     is_read=bool(item.get("isRead")),
                     has_attachments=bool(item.get("hasAttachments")),
                     attachment_names=[],
+                    internet_message_id=str(item.get("internetMessageId") or ""),
                 )
             )
         next_url = payload.get("@odata.nextLink")
     return messages
 
 
+def iter_mailbox_message_pages(
+    user_id: str,
+    received_after: str | None = None,
+    page_size: int = GRAPH_PAGE_SIZE,
+    start_next_link: str | None = None,
+    checkpoint: Any | None = None,
+):
+    """Yield every mailbox page, optionally restricted to a received-time high-water mark."""
+    # Keep Graph requests bounded. The caller may use smaller pages in tests,
+    # but never request more than 50 messages from Graph.
+    page_size = min(GRAPH_PAGE_SIZE, max(1, int(page_size)))
+    if config.is_mock_mode():
+        messages = list_mock_messages(user_id, limit=10_000_000)
+        if received_after:
+            messages = [message for message in messages if message.received_datetime > received_after]
+        for offset in range(0, len(messages), page_size):
+            yield messages[offset : offset + page_size]
+        return
+
+    token = graph_auth.get_valid_access_token()
+    # Bodies are fetched one message at a time by the large-mailbox worker.
+    select = "id,internetMessageId,subject,from,receivedDateTime,bodyPreview,isRead,hasAttachments"
+    next_url = start_next_link or f"{GRAPH_BASE_URL}/me/messages?$select={select}&$orderby=receivedDateTime%20asc&$top={page_size}"
+    if received_after:
+        graph_filter = quote(f"receivedDateTime gt {received_after}", safe="-:TZ.")
+        next_url += f"&$filter={graph_filter}"
+
+    LOGGER.info("Streaming complete Microsoft Graph mailbox after=%s page_size=%s.", received_after, page_size)
+    while next_url:
+        payload, token = _graph_get_with_token(next_url, token)
+        page: list[OutlookMessage] = []
+        for item in payload.get("value", []):
+            message = _outlook_message_from_graph_item(user_id, item)
+            if message is not None:
+                page.append(message)
+        following_link = str(payload.get("@odata.nextLink") or "")
+        if checkpoint:
+            checkpoint(following_link)
+        if page:
+            yield page
+        next_url = following_link
+
+
+def _outlook_message_from_graph_item(user_id: str, item: dict[str, Any]) -> OutlookMessage | None:
+    """Convert one Graph response item without changing mailbox state."""
+    message_id = str(item.get("id") or "").strip()
+    if not message_id:
+        LOGGER.warning("Graph message without id was skipped.")
+        return None
+    sender = (item.get("from") or {}).get("emailAddress", {}) or {}
+    body_info = item.get("body") or {}
+    return OutlookMessage(
+        message_id=message_id,
+        user_id=user_id,
+        sender_name=str(sender.get("name") or ""),
+        sender_email=str(sender.get("address") or ""),
+        subject=str(item.get("subject") or ""),
+        body=_body_to_text(str(body_info.get("content") or ""), str(body_info.get("contentType") or "")),
+        body_preview=str(item.get("bodyPreview") or ""),
+        received_datetime=str(item.get("receivedDateTime") or ""),
+        is_read=bool(item.get("isRead")),
+        has_attachments=bool(item.get("hasAttachments")),
+        attachment_names=[],
+    )
 def get_message_body(user_id: str, message_id: str) -> str:
     """Return one Outlook message body."""
     if config.is_mock_mode():
@@ -152,7 +235,7 @@ def _graph_get(url: str, token: str, retry_on_unauthorized: bool = True) -> dict
     return payload
 
 
-def _graph_get_with_token(url: str, token: str, retry_on_unauthorized: bool = True) -> tuple[dict[str, Any], str]:
+def _graph_get_with_token(url: str, token: str, retry_on_unauthorized: bool = True, retry_count: int = 0) -> tuple[dict[str, Any], str]:
     """GET Microsoft Graph JSON and return the access token that was actually used."""
     headers = _headers(str(token or ""))
     diagnostics = _graph_request_diagnostics("GET", url, str(token or ""), headers)
@@ -173,6 +256,12 @@ def _graph_get_with_token(url: str, token: str, retry_on_unauthorized: bool = Tr
     authenticate_header = _safe_authenticate_header(response)
     diagnostics.update(_graph_response_diagnostics(response, graph_error, authenticate_header))
     _remember_graph_request_diagnostic(diagnostics)
+    if response.status_code in RETRYABLE_GRAPH_STATUS_CODES and retry_count < 5:
+        retry_after = _retry_after_seconds(response)
+        delay = retry_after if retry_after is not None else min(60.0, 0.5 * (2 ** retry_count))
+        LOGGER.warning("Retryable Microsoft Graph response %s; retrying in %.1fs.", response.status_code, delay)
+        time.sleep(delay)
+        return _graph_get_with_token(url, token, retry_on_unauthorized, retry_count + 1)
     if response.status_code == 401 and retry_on_unauthorized:
         LOGGER.warning(
             "Microsoft Graph returned 401 code=%s message=%s authenticate_header=%s response_headers=%s response_body=%s; attempting silent token renewal once.",
@@ -210,6 +299,15 @@ def _graph_get_with_token(url: str, token: str, retry_on_unauthorized: bool = Tr
         )
         raise GraphApiError(response.status_code, graph_error["code"], graph_error["message"])
     return response.json(), str(token or "")
+
+
+def _retry_after_seconds(response: requests.Response) -> float | None:
+    """Parse Retry-After safely, with bounded exponential fallback handled by caller."""
+    value = str(getattr(response, "headers", {}).get("Retry-After", "") or "").strip()
+    try:
+        return min(60.0, max(0.0, float(value))) if value else None
+    except ValueError:
+        return None
 
 
 def last_graph_request_diagnostic() -> dict[str, str]:
