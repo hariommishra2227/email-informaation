@@ -30,6 +30,13 @@ LOGGER = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
 
 EMAIL_PATTERN = re.compile(r"(?P<email>[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})")
+INTERNAL_DOMAIN = "itsipl.com"
+BOILERPLATE_PHRASES = (
+    "privacy statement", "unsubscribe", "view online", "click here",
+    "warning: this message", "caution! this message",
+    "this message was sent from outside your organization", "external email",
+    "manage preferences", "copyright",
+)
 PHONE_PATTERN = re.compile(
     r"(?<![A-Za-z0-9])"
     r"(?:\+?\d{1,3}[\s.-]?)?"
@@ -88,6 +95,8 @@ NON_PHONE_KEYWORDS = (
     "quote",
 )
 ADDRESS_KEYWORDS = (
+    "sector", "phase", "industrial area", "nagar", "colony", "building",
+    "floor", "block", "plot", "district", "state", "india",
     "street",
     "road",
     "avenue",
@@ -176,6 +185,10 @@ class EmailExtractionEngine:
         """Return cleaned, non-empty lines from a text blob."""
         return [self._clean_text(line) for line in text.splitlines() if self._clean_text(line)]
 
+    def _is_boilerplate(self, line: str) -> bool:
+        lowered = line.lower()
+        return any(phrase in lowered for phrase in BOILERPLATE_PHRASES)
+
     def _looks_like_company(self, candidate: str) -> bool:
         """Return whether a candidate line looks like a company or organisation."""
         if not candidate:
@@ -191,7 +204,10 @@ class EmailExtractionEngine:
             return []
 
         try:
-            return list(dict.fromkeys(EMAIL_PATTERN.findall(text)))
+            return list(dict.fromkeys(
+                email for email in EMAIL_PATTERN.findall(text)
+                if not email.lower().endswith("@" + INTERNAL_DOMAIN)
+            ))
         except Exception as exc:
             LOGGER.exception("Email extraction failed: %s", exc)
             return []
@@ -284,7 +300,7 @@ class EmailExtractionEngine:
             return []
 
         try:
-            lines = self._iter_lines(text)
+            lines = [line for line in self._iter_lines(text) if not self._is_boilerplate(line)]
             phones = self._collect_phone_candidates(lines, prefer_labelled=True)
             if not phones:
                 phones = self._collect_phone_candidates(lines, prefer_labelled=False)
@@ -458,17 +474,20 @@ class EmailExtractionEngine:
             return ""
 
         try:
-            for line in self._iter_lines(text):
+            lines = [line for line in self._iter_lines(text) if not self._is_boilerplate(line)]
+            for line in lines:
                 lowered_line = line.lower()
-                if lowered_line.startswith("address:"):
-                    return line.split(":", 1)[1].strip()
-                if lowered_line.startswith("location:"):
-                    return line.split(":", 1)[1].strip()
-                if lowered_line.startswith("office:"):
-                    return line.split(":", 1)[1].strip()
+                if self._is_boilerplate(line) or lowered_line.startswith(("address:", "location:", "office:")):
+                    continue
+                if "itsipl" in lowered_line or "i. t. solutions india" in lowered_line:
+                    continue
+                candidate = line.split(":", 1)[1].strip() if ":" in line else line
+                if lowered_line.startswith(("address:", "location:", "office:")):
+                    if self._valid_postal_address(candidate):
+                        return candidate
 
             address_candidates: list[str] = []
-            for line in self._iter_lines(text):
+            for line in lines:
                 lowered_line = line.lower()
                 if any(keyword in lowered_line for keyword in ("address", "location", "office", "city", "state", "country")):
                     if not any(keyword in lowered_line for keyword in ("phone", "mobile", "tel", "telephone", "contact", "email")):
@@ -483,12 +502,30 @@ class EmailExtractionEngine:
                 if re.search(r"\b(?:sector|street|road|avenue|lane|drive|way|boulevard|court|place|park|colony|area)\b", lowered_line) and re.search(r"\d", line):
                     address_candidates.append(line)
 
-            if address_candidates:
-                return self._clean_text(address_candidates[0])
+            for candidate in address_candidates:
+                if self._valid_postal_address(candidate):
+                    return self._clean_text(candidate)
             return ""
         except Exception as exc:
             LOGGER.exception("Address extraction failed: %s", exc)
             return ""
+
+    def _valid_postal_address(self, value: str) -> bool:
+        """Accept only address-like text, never labels or disclaimer sentences."""
+        if not value or self._is_boilerplate(value):
+            return False
+        lowered = value.lower()
+        if "itsipl" in lowered or "i. t. solutions india" in lowered:
+            return False
+        if lowered.strip() in {"location", "privacy statement"}:
+            return False
+        indicators = sum(bool(re.search(rf"\b{re.escape(keyword)}\b", lowered)) for keyword in ADDRESS_KEYWORDS)
+        comma_parts = len([part for part in value.split(",") if part.strip()])
+        has_pin_or_number = bool(re.search(r"\b\d{6}\b", value) or re.search(r"\d", value))
+        # A street/sector/etc. token plus separate locality components (for
+        # example ``Sector 62, Noida, Uttar Pradesh``) is the common compact
+        # address form used in signatures.
+        return indicators >= 1 and has_pin_or_number and comma_parts >= 2
 
     def extract_designation(self, text: str) -> str:
         """Use keyword rules to detect a common business designation."""
@@ -508,7 +545,7 @@ class EmailExtractionEngine:
     def extract(self, email_text: str) -> dict[str, str]:
         """Run the full extraction pipeline and return the requested JSON schema."""
         try:
-            cleaned_text = self.clean_html(email_text)
+            cleaned_text = "\n".join(line for line in self.clean_html(email_text).splitlines() if not self._is_boilerplate(line))
             email_list = self.extract_email_addresses(cleaned_text)
             mobile_numbers = self.extract_mobile_numbers(cleaned_text)
             contact_name = self.extract_contact_person_name(cleaned_text)

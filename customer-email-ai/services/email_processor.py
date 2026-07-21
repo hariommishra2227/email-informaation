@@ -15,6 +15,7 @@ from storage import database
 
 
 LOGGER = logging.getLogger(__name__)
+INTERNAL_DOMAIN = "itsipl.com"
 
 
 def clean_html_to_text(body: str) -> str:
@@ -76,7 +77,7 @@ def build_customer_record(
     extracted = extractor.extract(cleaned_text)
 
     email = str(extracted.get("email_id") or extracted.get("email") or "").strip()
-    if not email and _looks_like_valid_email(sender_email):
+    if not email and _looks_like_valid_email(sender_email) and not sender_email.lower().endswith("@" + INTERNAL_DOMAIN):
         email = sender_email.strip()
 
     contact_name = str(extracted.get("contact_person_name") or extracted.get("name") or "").strip()
