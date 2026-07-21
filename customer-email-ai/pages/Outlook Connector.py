@@ -415,7 +415,7 @@ def _render_filters() -> tuple[int, str, str, tuple[date, date] | list, str | No
         with advanced_cols[0]:
             date_range = st.date_input("Date range", value=[])
         with advanced_cols[1]:
-            limit = st.number_input("Maximum emails", min_value=1, max_value=500, value=50, step=25)
+            limit = st.number_input("Maximum emails", min_value=1, max_value=1000, value=50, step=25)
     st.subheader("Email Date Filter")
     date_filter = st.radio(
         "Fetch emails received",
@@ -471,6 +471,8 @@ def _render_inbox_list(messages: list, status_rows: dict[str, str]) -> list[str]
         st.session_state["outlook_selected_messages"] = []
         return []
 
+    select_all = st.checkbox("Select All", key="select_all_outlook_messages")
+    selected_message_ids = _update_selected_outlook_messages(messages, select_all)
     selected_message_ids = st.session_state.get("selected_outlook_messages", [])
     table_rows = [
         {
@@ -504,6 +506,21 @@ def _render_inbox_list(messages: list, status_rows: dict[str, str]) -> list[str]
     return selected_ids
 
 
+def _update_selected_outlook_messages(messages: list, select_all: bool) -> list[str]:
+    """Update selection state using only the messages currently loaded in the UI."""
+    current_ids = [message.message_id for message in messages]
+    selected_ids = list(st.session_state.get("selected_outlook_messages", []))
+    previous_select_all = bool(st.session_state.get("previous_select_all_outlook_messages", False))
+    if select_all:
+        selected_ids = list(dict.fromkeys(selected_ids + current_ids))
+    elif previous_select_all:
+        selected_ids = []
+    st.session_state["previous_select_all_outlook_messages"] = select_all
+    st.session_state["selected_outlook_messages"] = selected_ids
+    st.session_state["outlook_selected_messages"] = selected_ids
+    return selected_ids
+
+
 def _render_excel_export(user_id: str, label: str = "Export to Excel") -> None:
     """Render Outlook registry Excel export button."""
     rows = get_customers(user_id)
@@ -524,6 +541,7 @@ def _import_messages(user_id: str, messages: list, message_ids: list[str]) -> No
     st.subheader("Extract Customer Information")
     by_id = {message.message_id: message for message in messages}
     summary = {
+        "selected_emails": len(message_ids),
         "emails_processed": 0,
         "customers_extracted": 0,
         "duplicates_skipped": 0,
@@ -536,35 +554,36 @@ def _import_messages(user_id: str, messages: list, message_ids: list[str]) -> No
         st.warning("Select at least one email to import.")
         return
     progress = st.progress(0)
-    for index, message_id in enumerate(message_ids, start=1):
-        summary["emails_processed"] += 1
-        if message_id in imported_ids:
-            summary["duplicates_skipped"] += 1
-            continue
-        message = by_id.get(message_id)
-        if not message:
-            summary["failed_records"] += 1
-            continue
-        try:
-            result = process_outlook_message(user_id, message)
-            if result.status == "Already Processed":
+    for batch_start in range(0, len(message_ids), 50):
+        for index, message_id in enumerate(message_ids[batch_start:batch_start + 50], start=batch_start + 1):
+            summary["emails_processed"] += 1
+            progress.progress(index / len(message_ids))
+            if message_id in imported_ids:
                 summary["duplicates_skipped"] += 1
-            elif result.status == "Duplicate":
-                summary["duplicates_skipped"] += 1
-                imported_ids.add(message_id)
-            elif result.status == "Incomplete":
-                summary["incomplete_records"] += 1
-                summary["customers_extracted"] += 1
-                imported_ids.add(message_id)
-            elif result.status == "Failed":
+                continue
+            message = by_id.get(message_id)
+            if not message:
                 summary["failed_records"] += 1
-            else:
-                summary["customers_extracted"] += 1
-                imported_ids.add(message_id)
-        except Exception:
-            LOGGER.exception("Outlook message import failed.")
-            summary["failed_records"] += 1
-        progress.progress(index / len(message_ids))
+                continue
+            try:
+                result = process_outlook_message(user_id, message)
+                if result.status == "Already Processed":
+                    summary["duplicates_skipped"] += 1
+                elif result.status == "Duplicate":
+                    summary["duplicates_skipped"] += 1
+                    imported_ids.add(message_id)
+                elif result.status == "Incomplete":
+                    summary["incomplete_records"] += 1
+                    summary["customers_extracted"] += 1
+                    imported_ids.add(message_id)
+                elif result.status == "Failed":
+                    summary["failed_records"] += 1
+                else:
+                    summary["customers_extracted"] += 1
+                    imported_ids.add(message_id)
+            except Exception:
+                LOGGER.exception("Outlook message import failed.")
+                summary["failed_records"] += 1
     st.session_state["imported_outlook_message_ids"] = sorted(imported_ids)
     st.session_state["outlook_import_summary"] = summary
 
@@ -575,8 +594,9 @@ def _render_import_result() -> None:
     if not summary:
         return
     st.subheader("Extraction Summary")
-    result_cols = st.columns(5)
+    result_cols = st.columns(6)
     labels = [
+        ("Emails selected", "selected_emails"),
         ("Emails processed", "emails_processed"),
         ("Customers extracted", "customers_extracted"),
         ("Duplicates skipped", "duplicates_skipped"),
