@@ -135,3 +135,24 @@ Run with:
 python -m pytest -q
 streamlit run app.py
 ```
+# Review queue, provenance, and optional LLM fallback
+
+Customer rows now retain field-level source, confidence, and evidence metadata. New installations and existing SQLite databases are migrated idempotently at startup; when an existing file is changed, a sibling `.pre-provenance.bak` backup is created before columns are added. Existing records are preserved.
+
+The Customer Registry includes a Review Queue. Filter by review status, inspect each field's source/confidence/evidence, edit values, and save an Approved, Needs Review, or Rejected decision. Corrections are written as `manual_review` values with confidence `1.0` and append-only entries in `review_audit`.
+
+LLM extraction is disabled by default and is only a fallback for unresolved fields. It uses the OpenAI Chat Completions JSON response format when enabled:
+
+```text
+LLM_ENABLED=true
+LLM_PROVIDER=openai
+LLM_API_KEY=...
+LLM_MODEL=gpt-4o-mini
+LLM_MAX_CALLS_PER_RUN=10
+LLM_MAX_INPUT_CHARS=12000
+LLM_TIMEOUT_SECONDS=20
+```
+
+The API key is read from environment variables or Streamlit secrets and is never logged. Responses require evidence present in the cleaned source, valid confidence, and deterministic email/company validation. Invalid responses, timeouts, missing keys, and call-limit exhaustion safely leave existing extraction values unchanged. Do not send attachments or production data to an external model without an approved privacy review.
+
+Run locally with `python -m pytest -q` and start Streamlit with `streamlit run app.py` from this directory. Disable the fallback with `LLM_ENABLED=false` (the default); tests mock the provider and do not require a paid API call.

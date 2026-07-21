@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import json
 import sqlite3
+import shutil
 from collections.abc import Iterable
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -13,6 +14,7 @@ from typing import Any
 
 from config import DATABASE_PATH
 from models import CustomerRecord, OutlookMessage
+from duplicate_detector import normalize_email, normalize_mobile
 
 
 LOGGER = logging.getLogger(__name__)
@@ -176,6 +178,42 @@ def _initialize_database(db_path: Path | str | None = None) -> None:
             );
             """
         )
+        _migrate_customer_provenance(connection, db_path)
+
+
+PROVENANCE_COLUMNS = {
+    "name_source": "TEXT DEFAULT ''", "name_confidence": "REAL DEFAULT 0", "name_evidence": "TEXT DEFAULT ''",
+    "email_source": "TEXT DEFAULT ''", "email_confidence": "REAL DEFAULT 0", "email_evidence": "TEXT DEFAULT ''",
+    "organisation_source": "TEXT DEFAULT ''", "organisation_confidence": "REAL DEFAULT 0", "organisation_evidence": "TEXT DEFAULT ''",
+    "mobile_source": "TEXT DEFAULT ''", "mobile_confidence": "REAL DEFAULT 0", "mobile_evidence": "TEXT DEFAULT ''",
+    "designation_source": "TEXT DEFAULT ''", "designation_confidence": "REAL DEFAULT 0", "designation_evidence": "TEXT DEFAULT ''",
+    "address_source": "TEXT DEFAULT ''", "address_confidence": "REAL DEFAULT 0", "address_evidence": "TEXT DEFAULT ''",
+    "extraction_method": "TEXT DEFAULT 'regex_spacy'", "llm_used": "INTEGER DEFAULT 0", "llm_model": "TEXT DEFAULT ''", "llm_error": "TEXT DEFAULT ''",
+    "review_status": "TEXT DEFAULT 'Needs Review'", "reviewed_at": "TEXT DEFAULT ''", "reviewed_by": "TEXT DEFAULT ''", "correction_notes": "TEXT DEFAULT ''",
+    "internet_message_id": "TEXT DEFAULT ''", "sender_email": "TEXT DEFAULT ''", "sender_domain": "TEXT DEFAULT ''", "processed_at": "TEXT DEFAULT ''",
+}
+
+
+def _migrate_customer_provenance(connection: sqlite3.Connection, db_path: Path | str | None = None) -> None:
+    """Idempotently add provenance columns and review audit storage."""
+    existing = {str(row[1]) for row in connection.execute("PRAGMA table_info(customers)").fetchall()}
+    missing = {name: definition for name, definition in PROVENANCE_COLUMNS.items() if name not in existing}
+    if missing and db_path not in (None, ":memory:"):
+        path = Path(db_path)
+        if path.exists():
+            backup = path.with_name(f"{path.name}.pre-provenance.bak")
+            if not backup.exists():
+                shutil.copy2(path, backup)
+    for name, definition in missing.items():
+        connection.execute(f"ALTER TABLE customers ADD COLUMN {name} {definition}")
+    connection.execute(
+        """CREATE TABLE IF NOT EXISTS review_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, record_id INTEGER NOT NULL,
+            field_name TEXT NOT NULL, old_value TEXT, new_value TEXT,
+            old_source TEXT, new_source TEXT, reviewed_at TEXT NOT NULL,
+            reviewed_by TEXT, notes TEXT
+        )"""
+    )
 
 
 def _ensure_oauth_auth_flows_table(connection: sqlite3.Connection) -> None:
@@ -429,33 +467,16 @@ def insert_customer(customer: CustomerRecord) -> int:
         ).fetchone() if customer.source_message_id else None
         if existing:
             return int(existing["id"])
-        cursor = connection.execute(
-            """
-            INSERT INTO customers (
-                user_id, contact_name, organisation, email, normalized_email,
-                mobile, normalized_mobile, designation, address, subject,
-                source, source_message_id, confidence, status, created_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                customer.user_id,
-                customer.contact_name,
-                customer.organisation,
-                customer.email,
-                customer.normalized_email,
-                customer.mobile,
-                customer.normalized_mobile,
-                customer.designation,
-                customer.address,
-                customer.subject,
-                customer.source,
-                customer.source_message_id,
-                customer.confidence,
-                customer.status,
-                utc_now(),
-            ),
-        )
+        values = {"user_id": customer.user_id, "contact_name": customer.contact_name, "organisation": customer.organisation,
+            "email": customer.email, "normalized_email": customer.normalized_email, "mobile": customer.mobile,
+            "normalized_mobile": customer.normalized_mobile, "designation": customer.designation, "address": customer.address,
+            "subject": customer.subject, "source": customer.source, "source_message_id": customer.source_message_id,
+            "confidence": customer.confidence, "status": customer.status, "created_at": utc_now()}
+        for name in PROVENANCE_COLUMNS:
+            values[name] = getattr(customer, name)
+        columns = ", ".join(values)
+        placeholders = ", ".join("?" for _ in values)
+        cursor = connection.execute(f"INSERT INTO customers ({columns}) VALUES ({placeholders})", tuple(values.values()))
     return int(cursor.lastrowid)
 
 
@@ -526,6 +547,48 @@ def list_outlook_message_rows(user_id: str) -> list[dict[str, Any]]:
             (user_id,),
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+def update_customer_review(record_id: int, fields: dict[str, Any], reviewed_by: str = "", notes: str = "") -> None:
+    """Apply reviewed corrections while recording every changed field."""
+    with get_connection() as connection:
+        row = connection.execute("SELECT * FROM customers WHERE id = ?", (int(record_id),)).fetchone()
+        if row is None:
+            raise ValueError("Customer record not found.")
+        now = utc_now()
+        updates: dict[str, Any] = {}
+        for field, new_value in fields.items():
+            if field not in {"contact_name", "email", "organisation", "mobile", "designation", "address", "subject"}:
+                continue
+            old_value = str(row[field] or "")
+            new_value = str(new_value or "").strip()
+            if old_value == new_value:
+                continue
+            source_field = {"contact_name": "name_source", "email": "email_source", "organisation": "organisation_source", "mobile": "mobile_source", "designation": "designation_source", "address": "address_source"}.get(field)
+            old_source = str(row[source_field] or "") if source_field else ""
+            if source_field:
+                updates[source_field] = "manual_review"
+                updates[source_field.replace("_source", "_confidence")] = 1.0
+            updates[field] = new_value
+            if field == "email":
+                updates["normalized_email"] = normalize_email(new_value)
+            elif field == "mobile":
+                updates["normalized_mobile"] = normalize_mobile(new_value)
+            connection.execute("INSERT INTO review_audit (record_id, field_name, old_value, new_value, old_source, new_source, reviewed_at, reviewed_by, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (record_id, field, old_value, new_value, old_source, "manual_review", now, reviewed_by, notes))
+        updates.update({"review_status": fields.get("review_status", "Approved"), "reviewed_at": now, "reviewed_by": reviewed_by, "correction_notes": notes})
+        assignments = ", ".join(f"{key} = ?" for key in updates)
+        connection.execute(f"UPDATE customers SET {assignments} WHERE id = ?", (*updates.values(), int(record_id)))
+
+
+def list_review_audit(record_id: int | None = None) -> list[dict[str, Any]]:
+    query = "SELECT * FROM review_audit"
+    params: tuple[Any, ...] = ()
+    if record_id is not None:
+        query += " WHERE record_id = ?"
+        params = (int(record_id),)
+    query += " ORDER BY reviewed_at DESC, id DESC"
+    with get_connection() as connection:
+        return [dict(row) for row in connection.execute(query, params).fetchall()]
 
 
 def list_pending_outlook_messages(user_id: str) -> list[dict[str, Any]]:

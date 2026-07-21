@@ -99,6 +99,15 @@ def _secret_value(name: str, default: str = "") -> str:
     return default
 
 
+LLM_ENABLED = _secret_value("LLM_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
+LLM_PROVIDER = _secret_value("LLM_PROVIDER", "openai")
+LLM_API_KEY = _secret_value("LLM_API_KEY", "")
+LLM_MODEL = _secret_value("LLM_MODEL", "gpt-4o-mini")
+LLM_MAX_CALLS_PER_RUN = int(_secret_value("LLM_MAX_CALLS_PER_RUN", "10"))
+LLM_MAX_INPUT_CHARS = int(_secret_value("LLM_MAX_INPUT_CHARS", "12000"))
+LLM_TIMEOUT_SECONDS = int(_secret_value("LLM_TIMEOUT_SECONDS", "20"))
+
+
 def _nested_microsoft_secret_value(key: str) -> str:
     """Read legacy nested Microsoft secrets for backward compatibility."""
     if st is not None:
