@@ -46,7 +46,7 @@ PHONE_PATTERN = re.compile(
     r"\d{2,5}"
     r"(?![A-Za-z0-9])"
 )
-PERSON_NAME_PATTERN = re.compile(r"^[A-Z][A-Za-z'\-.]+(?:\s+[A-Z][A-Za-z'\-.]+)+$")
+PERSON_NAME_PATTERN = re.compile(r"^[A-Z][A-Za-z'\-.]*(?:\s+[A-Z][A-Za-z'\-.]+)+$")
 COMPANY_HINT_PATTERN = re.compile(
     r"\b(?:company|companies|organization|organisation|solutions|technologies|systems|software|services|industries|ventures|logistics|telecom|retail|group|ltd|limited|pvt|private|inc|llc|corp|corporation)\b",
     re.IGNORECASE,
@@ -135,6 +135,11 @@ DESIGNATION_KEYWORDS: dict[str, str] = {
     "cto": "CTO",
     "cio": "CIO",
 }
+GENERIC_MAILBOXES = {
+    "info", "sales", "support", "contact", "admin", "office", "help",
+    "enquiry", "marketing", "hr", "accounts", "noreply", "no-reply",
+}
+QUOTE_MARKERS = ("---------- forwarded message", "begin forwarded message", "original message", "-----original message-----")
 
 
 def _valid_email(value: str) -> bool:
@@ -218,6 +223,91 @@ class EmailExtractionEngine:
     def _iter_lines(self, text: str) -> list[str]:
         """Return cleaned, non-empty lines from a text blob."""
         return [self._clean_text(line) for line in text.splitlines() if self._clean_text(line)]
+
+    def _current_text(self, text: str) -> str:
+        """Return readable current-message text, stopping at quoted history."""
+        cleaned = self.clean_html(text).replace("\r\n", "\n")
+        lines = cleaned.splitlines()
+        current: list[str] = []
+        for line in lines:
+            lowered = line.strip().lower()
+            if any(marker in lowered for marker in QUOTE_MARKERS) or re.match(r"^>+", line.strip()):
+                break
+            if re.match(r"^(from|sent|to|cc|subject):\s", lowered) and current and lowered.startswith("from:"):
+                break
+            current.append(line)
+        return "\n".join(current)
+
+    def _split_blocks(self, text: str) -> list[str]:
+        """Split current content without allowing fields to cross blank lines."""
+        blocks: list[list[str]] = []
+        block: list[str] = []
+        for raw in text.splitlines():
+            line = self._clean_text(raw)
+            if not line:
+                if block:
+                    blocks.append(block); block = []
+                continue
+            block.append(line)
+            if re.search(r"(?:best|kind|warm) regards|sincerely|thank you", line, re.I):
+                # The marker belongs to the following signature lines; retain it in this block.
+                continue
+        if block:
+            blocks.append(block)
+        merged: list[str] = []
+        for block in blocks:
+            if merged and not self.extract_email_addresses(merged[-1]) and (
+                self.extract_designation(merged[-1]) or self._looks_like_company(merged[-1])
+            ) and self.extract_email_addresses("\n".join(block)):
+                merged[-1] += "\n" + "\n".join(block)
+            else:
+                merged.append("\n".join(block))
+        return merged
+
+    def _name_email_similarity(self, name: str, email: str) -> float:
+        local = email.split("@", 1)[0].lower()
+        tokens = [part for part in re.split(r"[^a-z]+", local) if part]
+        name_tokens = [part.lower() for part in re.findall(r"[A-Za-z]+", name)]
+        if not tokens or not name_tokens:
+            return 0.0
+        if local in {"".join(name_tokens), ".".join(name_tokens), "_".join(name_tokens)}:
+            return 1.0
+        matches = sum(token == candidate or token.startswith(candidate[:1]) for token in tokens for candidate in name_tokens)
+        return min(1.0, matches / max(len(name_tokens), 2))
+
+    def _pair_block(self, block: str) -> dict[str, Any] | None:
+        lines = self._iter_lines(block)
+        emails = self.extract_email_addresses(block)
+        if not emails:
+            return None
+        email = emails[0]
+        generic = email.split("@", 1)[0].lower() in GENERIC_MAILBOXES
+        names = [(i, line) for i, line in enumerate(lines) if self._looks_like_person_name(line) and not self.extract_designation(line)]
+        for i, line in enumerate(lines):
+            match = re.search(r"(?:contact|name|regards|thanks)\s*:\s*([A-Z][A-Za-z'\-.]+(?:\s+[A-Z][A-Za-z'\-.]+)+)", line, re.I)
+            if match and self._looks_like_person_name(match.group(1)):
+                names.append((i, match.group(1)))
+        email_line = next((i for i, line in enumerate(lines) if EMAIL_PATTERN.search(line)), 0)
+        ranked = []
+        for index, name in names:
+            distance = abs(email_line - index)
+            similarity = self._name_email_similarity(name, email)
+            score = 0.25 + max(0.0, 0.25 - min(distance, 5) * 0.04) + similarity * 0.35
+            if generic:
+                score = 0.45 + max(0.0, 0.25 - min(distance, 5) * 0.04)
+            ranked.append((score, -distance, name))
+        name = ""
+        score = 0.35 if generic else 0.30
+        if ranked:
+            best = max(ranked)
+            if (generic and best[0] >= 0.55) or (not generic and best[0] >= 0.55):
+                score, _, name = best
+        return {"block": block, "email": email, "name": name, "confidence": round(min(score, 1.0), 2)}
+
+    def extract_contacts(self, email_text: str) -> list[dict[str, Any]]:
+        """Extract independently paired contact candidates from local blocks."""
+        current = self._current_text(email_text)
+        return [candidate for block in self._split_blocks(current) if (candidate := self._pair_block(block))]
 
     def _is_boilerplate(self, line: str) -> bool:
         lowered = line.lower()
@@ -580,14 +670,21 @@ class EmailExtractionEngine:
     def extract(self, email_text: str, *, graph_sender_email: str = "", graph_sender_name: str = "") -> dict[str, Any]:
         """Run the full extraction pipeline and return the requested JSON schema."""
         try:
-            cleaned_text = "\n".join(line for line in self.clean_html(email_text).splitlines() if not self._is_boilerplate(line))
-            email_list = self.extract_email_addresses(cleaned_text)
+            cleaned_text = "\n".join(line for line in self._current_text(email_text).splitlines() if not self._is_boilerplate(line))
+            contacts = self.extract_contacts(cleaned_text)
+            email_list = [contact["email"] for contact in reversed(contacts)]
             selected_email = select_customer_email(graph_sender_email=graph_sender_email, body_emails=email_list)
-            mobile_numbers = self.extract_mobile_numbers(cleaned_text)
-            contact_name = graph_sender_name.strip() if graph_sender_name.strip() else self.extract_contact_person_name(cleaned_text)
-            organisation_name = self.extract_organisation_name(cleaned_text)
-            address = self.extract_address(cleaned_text)
-            designation = self.extract_designation(cleaned_text)
+            selected_contact = next((contact for contact in contacts if contact["email"].lower() == selected_email["email"].lower()), {})
+            block_text = selected_contact.get("block", "")
+            analysis_text = block_text or cleaned_text
+            mobile_numbers = self.extract_mobile_numbers(analysis_text)
+            contact_name = selected_contact.get("name", "")
+            if graph_sender_name.strip() and graph_sender_email and graph_sender_email.lower() == selected_email["email"].lower():
+                if not contact_name or self._name_email_similarity(graph_sender_name, selected_email["email"]) >= 0.5:
+                    contact_name = graph_sender_name.strip()
+            organisation_name = self.extract_organisation_name(analysis_text)
+            address = self.extract_address(analysis_text)
+            designation = self.extract_designation(analysis_text)
             subject = self.extract_subject(cleaned_text)
 
             result: dict[str, str] = {
@@ -598,6 +695,8 @@ class EmailExtractionEngine:
                 "email": selected_email["email"],
                 "email_source": selected_email["email_source"],
                 "email_confidence": selected_email["email_confidence"],
+                "pairing_confidence": selected_contact.get("confidence", 0.0),
+                "contacts": contacts,
                 "organisation_name": organisation_name,
                 "company": organisation_name,
                 "mobile_number": mobile_numbers[0] if mobile_numbers else "",
