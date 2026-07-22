@@ -73,6 +73,7 @@ def list_inbox_messages(
     limit: int = 50,
     received_after: str | None = None,
     received_before: str | None = None,
+    folder: str = "Inbox",
 ) -> list[OutlookMessage]:
     """Return Outlook inbox messages without marking them read."""
     limit = max(1, int(limit or 50))
@@ -86,8 +87,9 @@ def list_inbox_messages(
 
     token = graph_auth.get_valid_access_token()
     LOGGER.info("Calling Microsoft Graph inbox endpoint with limit=%s.", limit)
+    folder_id = {"Inbox": "inbox", "Sent Items": "sentitems", "Archive": "archive", "Drafts": "drafts"}.get(folder, "inbox")
     next_url = (
-        f"{GRAPH_BASE_URL}/me/mailFolders/inbox/messages"
+        f"{GRAPH_BASE_URL}/me/mailFolders/{folder_id}/messages"
         "?$select=id,internetMessageId,subject,from,receivedDateTime,bodyPreview,body,isRead,hasAttachments,webLink"
         "&$orderby=receivedDateTime desc&$top=50"
     )
