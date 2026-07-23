@@ -106,6 +106,12 @@ LLM_MODEL = _secret_value("LLM_MODEL", "gpt-4o-mini")
 LLM_MAX_CALLS_PER_RUN = int(_secret_value("LLM_MAX_CALLS_PER_RUN", "10"))
 LLM_MAX_INPUT_CHARS = int(_secret_value("LLM_MAX_INPUT_CHARS", "12000"))
 LLM_TIMEOUT_SECONDS = int(_secret_value("LLM_TIMEOUT_SECONDS", "20"))
+AWS_REGION = _secret_value("AWS_REGION", "ap-south-1")
+BEDROCK_MODEL_ID = _secret_value("BEDROCK_MODEL_ID", "anthropic.claude-3-5-sonnet-20241022-v2:0")
+BEDROCK_CONFIDENCE_THRESHOLD = float(_secret_value("BEDROCK_CONFIDENCE_THRESHOLD", "0.80"))
+BEDROCK_MAX_CALLS_PER_RUN = int(_secret_value("BEDROCK_MAX_CALLS_PER_RUN", str(LLM_MAX_CALLS_PER_RUN)))
+BEDROCK_MAX_INPUT_CHARS = int(_secret_value("BEDROCK_MAX_INPUT_CHARS", str(LLM_MAX_INPUT_CHARS)))
+BEDROCK_TIMEOUT_SECONDS = int(_secret_value("BEDROCK_TIMEOUT_SECONDS", str(LLM_TIMEOUT_SECONDS)))
 
 
 def _nested_microsoft_secret_value(key: str) -> str:

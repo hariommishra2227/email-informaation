@@ -486,6 +486,8 @@ class EmailExtractionEngine:
         if len(candidate.split()) < 2:
             return False
         lowered = candidate.lower()
+        if lowered in DESIGNATION_KEYWORDS or lowered in set(DESIGNATION_KEYWORDS.values()):
+            return False
         if self._looks_like_company(candidate):
             return False
         if any(keyword in lowered for keyword in ("@", "http", "mobile", "phone", "tel", "contact", "address", "location", "subject", "customer", "sample", "email")):
@@ -697,7 +699,15 @@ class EmailExtractionEngine:
             return ""
 
         try:
-            lower_text = self.extract_signature(text).lower() or text.lower()
+            signature = self.extract_signature(text)
+            if signature:
+                lower_text = signature.lower()
+            elif EMAIL_PATTERN.search(text) and any(self._looks_like_person_name(line) for line in self._iter_lines(text)):
+                # Treat a tightly paired name/email contact block as a signature-like
+                # block for backwards compatibility with structured imports.
+                lower_text = text.lower()
+            else:
+                return ""
             for keyword, designation in sorted(DESIGNATION_KEYWORDS.items(), key=lambda item: len(item[0]), reverse=True):
                 if keyword in lower_text:
                     return designation

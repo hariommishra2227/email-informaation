@@ -56,17 +56,24 @@ def _validate(payload: Any, source: str) -> dict[str, dict[str, Any]]:
 def extract_with_llm(cleaned_text: str, current: dict[str, Any] | None = None, *, sender_email: str = "") -> dict[str, Any]:
     """Call the configured provider only when enabled and credentials exist."""
     global CALLS_THIS_RUN
-    if not config.LLM_ENABLED or not config.LLM_API_KEY:
+    if not config.LLM_ENABLED or (config.LLM_PROVIDER.lower() != "bedrock" and not config.LLM_API_KEY):
         return {"fields": _empty(), "llm_used": False, "llm_model": config.LLM_MODEL, "llm_error": "disabled_or_missing_api_key"}
+    if current:
+        confidences = [float(current.get(key, 0) or 0) for key in ("name_confidence", "email_confidence", "organisation_confidence", "mobile_confidence", "designation_confidence")]
+        if confidences and min(confidences) >= (config.BEDROCK_CONFIDENCE_THRESHOLD if config.LLM_PROVIDER.lower() == "bedrock" else 1.1):
+            return {"fields": _empty(), "llm_used": False, "llm_model": config.LLM_MODEL, "llm_error": "high_confidence_local_result"}
     if CALLS_THIS_RUN >= config.LLM_MAX_CALLS_PER_RUN:
         return {"fields": _empty(), "llm_used": False, "llm_model": config.LLM_MODEL, "llm_error": "call_limit_reached"}
     CALLS_THIS_RUN += 1
-    source = str(cleaned_text or "")[:config.LLM_MAX_INPUT_CHARS]
+    source = str(cleaned_text or "")[:(config.BEDROCK_MAX_INPUT_CHARS if config.LLM_PROVIDER.lower() == "bedrock" else config.LLM_MAX_INPUT_CHARS)]
     prompt = (
         "Return JSON only using keys customer_name,email,organisation,mobile,designation,address. "
         "Each value must have value,evidence,confidence. Extract only explicit evidence in this text; "
         "never invent, use ITSIPL details, quoted history, or replace the validated external sender email.\n\n" + source
     )
+    if config.LLM_PROVIDER.lower() == "bedrock":
+        from bedrock_extractor import extract_with_bedrock
+        return extract_with_bedrock(source, sender_email=sender_email)
     if config.LLM_PROVIDER.lower() != "openai":
         return {"fields": _empty(), "llm_used": False, "llm_model": config.LLM_MODEL, "llm_error": "unsupported_provider"}
     try:

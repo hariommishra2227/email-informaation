@@ -88,7 +88,7 @@ def build_customer_record(
         for field, item in llm_result.get("fields", {}).items():
             if not item.get("value"):
                 continue
-            target = {"customer_name": "contact_person_name", "email": "email_id", "organisation": "organisation_name", "mobile": "mobile_number", "designation": "designation", "address": "address"}.get(field)
+            target = {"customer_name": "contact_person_name", "email": "email_id", "organisation": "organisation_name", "mobile": "mobile_number", "mobile_number": "mobile_number", "designation": "designation", "address": "address"}.get(field)
             confidence_key = {"customer_name": "name_confidence", "email": "email_confidence", "organisation": "organisation_confidence", "mobile": "mobile_confidence", "designation": "designation_confidence", "address": "address_confidence"}.get(field)
             if target and (not extracted.get(target) or float(item.get("confidence", 0)) > float(extracted.get(confidence_key, 0) or 0)):
                 extracted[target] = item["value"]
