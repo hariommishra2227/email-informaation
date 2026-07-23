@@ -71,6 +71,7 @@ def build_customer_record(
     source_message_id: str = "",
     sender_email: str = "",
     sender_name: str = "",
+    receiver_name: str = "",
     subject: str = "",
     engine: EmailExtractionEngine | None = None,
 ) -> CustomerRecord:
@@ -162,6 +163,8 @@ def build_customer_record(
         address_evidence=llm_result.get("fields", {}).get("address", {}).get("evidence", "") or customer_values["address"],
         review_status=review_status,
         sender_email=sender_email,
+        sender_name=sender_name.strip(),
+        receiver_name=receiver_name.strip(),
         sender_domain=config.get_email_domain(sender_email),
         processed_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         llm_used=bool(llm_result.get("llm_used")),
@@ -214,6 +217,7 @@ def process_outlook_message(
             source_message_id=message.message_id,
             sender_email=message.sender_email,
             sender_name=message.sender_name,
+            receiver_name=message.receiver_name,
             subject=message.subject,
             engine=engine,
         )

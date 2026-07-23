@@ -26,6 +26,8 @@ def to_export_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         export_rows.append(
             {
                 "contact_person_name": row.get("contact_name", ""),
+                "sender_name": row.get("sender_name", ""),
+                "receiver_name": row.get("receiver_name", ""),
                 "organisation_name": row.get("organisation", ""),
                 "email_id": row.get("email", ""),
                 "mobile_number": row.get("mobile", ""),
