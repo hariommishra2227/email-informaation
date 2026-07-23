@@ -140,6 +140,10 @@ GENERIC_MAILBOXES = {
     "enquiry", "marketing", "hr", "accounts", "noreply", "no-reply",
 }
 QUOTE_MARKERS = ("---------- forwarded message", "begin forwarded message", "original message", "-----original message-----")
+SIGNATURE_MARKERS = re.compile(r"(?im)^\s*(?:thanks\s*&\s*regards|thanks and regards|best regards|warm regards|kind regards|regards|sincerely|धन्यवाद)\s*,?\s*$")
+NAME_REJECT_WORDS = ("payment", "account", "quotation", "alert", "detected", "reminder", "invoice", "order", "part number", "purchase order", "support", "notification", "warning", "caution")
+ORG_REJECT_PHRASES = ("warning", "caution", "message was sent", "outside your organization", "please find", "go ahead", "thanks and regards", "reminder", "attached", "review", "subject", "reply")
+FREE_EMAIL_DOMAINS = {"gmail.com", "yahoo.com", "outlook.com", "hotmail.com"}
 
 
 def _valid_email(value: str) -> bool:
@@ -215,6 +219,37 @@ class EmailExtractionEngine:
         except Exception as exc:
             LOGGER.exception("HTML cleanup failed: %s", exc)
             return unescape(text)
+
+    def clean_email_content(self, text: str) -> str:
+        """Remove transport noise and quoted history while retaining the latest signature."""
+        text = self.clean_html(text).replace("\r\n", "\n").replace("\r", "\n")
+        lines = []
+        for line in text.splitlines():
+            lowered = line.strip().lower()
+            if any(p in lowered for p in ("this message was sent from outside your organization", "external email", "caution!", "warning!", "confidentiality notice", "confidentiality disclaimer", "antivirus")):
+                continue
+            if any(marker in lowered for marker in QUOTE_MARKERS) or re.match(r"^>+", line.strip()):
+                break
+            if re.match(r"^(from|sent|to|cc):\s", lowered) and lines:
+                break
+            lines.append(line)
+        return "\n".join(self._clean_text(line) if self._clean_text(line) else "" for line in lines).strip()
+
+    def extract_signature(self, text: str) -> str:
+        """Return only the latest signature block, if a sign-off is present."""
+        cleaned = self.clean_email_content(text)
+        matches = list(SIGNATURE_MARKERS.finditer(cleaned))
+        if not matches:
+            return ""
+        return cleaned[matches[-1].start():].strip()
+
+    def _valid_name(self, value: str) -> bool:
+        value = re.sub(r"^(dear|hi|hello)\s+", "", value.strip(), flags=re.I).strip(" ,:")
+        return bool(value and len(value.split()) <= 4 and not any(w in value.lower() for w in NAME_REJECT_WORDS) and self._looks_like_person_name(value))
+
+    def _valid_organisation(self, value: str) -> bool:
+        value = self._clean_text(value).strip(" ,:;-|")
+        return bool(value and len(value.split()) <= 8 and not any(p in value.lower() for p in ORG_REJECT_PHRASES) and not re.search(r"[!?]", value) and not self._looks_like_person_name(value))
 
     def _clean_text(self, text: str) -> str:
         """Normalize repeated whitespace into a single space."""
@@ -431,8 +466,12 @@ class EmailExtractionEngine:
 
             display_numbers: list[str] = []
             for candidate in phones:
+                context = next((line for line in lines if candidate in line), "").lower()
+                if any(word in context for word in ("po", "invoice", "ticket", "order", "case", "reference", "serial", "otp", "toll-free", "toll free")):
+                    continue
                 normalized = self._normalize_phone_number(candidate)
-                if normalized:
+                digits = re.sub(r"\D", "", candidate)
+                if normalized and (not digits.startswith("91") and not (len(digits) == 10 and digits[:1] not in "6789") or digits[-10:][:1] in "6789"):
                     display_numbers.append(self._format_phone_number_for_display(candidate))
 
             return list(dict.fromkeys(display_numbers))
@@ -658,7 +697,7 @@ class EmailExtractionEngine:
             return ""
 
         try:
-            lower_text = text.lower()
+            lower_text = self.extract_signature(text).lower() or text.lower()
             for keyword, designation in sorted(DESIGNATION_KEYWORDS.items(), key=lambda item: len(item[0]), reverse=True):
                 if keyword in lower_text:
                     return designation
@@ -670,19 +709,29 @@ class EmailExtractionEngine:
     def extract(self, email_text: str, *, graph_sender_email: str = "", graph_sender_name: str = "") -> dict[str, Any]:
         """Run the full extraction pipeline and return the requested JSON schema."""
         try:
-            cleaned_text = "\n".join(line for line in self._current_text(email_text).splitlines() if not self._is_boilerplate(line))
+            cleaned_text = self.clean_email_content(email_text)
+            signature = self.extract_signature(cleaned_text)
             contacts = self.extract_contacts(cleaned_text)
             email_list = [contact["email"] for contact in reversed(contacts)]
             selected_email = select_customer_email(graph_sender_email=graph_sender_email, body_emails=email_list)
             selected_contact = next((contact for contact in contacts if contact["email"].lower() == selected_email["email"].lower()), {})
             block_text = selected_contact.get("block", "")
-            analysis_text = block_text or cleaned_text
-            mobile_numbers = self.extract_mobile_numbers(analysis_text)
+            analysis_text = signature or block_text or cleaned_text
+            mobile_text = signature if self.extract_mobile_numbers(signature) else (block_text or cleaned_text)
+            mobile_numbers = self.extract_mobile_numbers(mobile_text)
             contact_name = selected_contact.get("name", "")
             if graph_sender_name.strip() and graph_sender_email and graph_sender_email.lower() == selected_email["email"].lower():
                 if not contact_name or self._name_email_similarity(graph_sender_name, selected_email["email"]) >= 0.5:
                     contact_name = graph_sender_name.strip()
-            organisation_name = self.extract_organisation_name(analysis_text)
+            if not self._valid_name(contact_name):
+                contact_name = ""
+            organisation_name = self.extract_organisation_name(signature or cleaned_text)
+            if not self._valid_organisation(organisation_name):
+                domain = graph_sender_email.split("@", 1)[1].lower() if "@" in graph_sender_email else ""
+                organisation_name = "" if domain in FREE_EMAIL_DOMAINS else (domain.split(".")[0].replace("-", " ").title() if domain else "")
+                org_source = "domain" if organisation_name else ""
+            else:
+                org_source = "signature" if signature else "body"
             address = self.extract_address(analysis_text)
             designation = self.extract_designation(analysis_text)
             subject = self.extract_subject(cleaned_text)
@@ -707,6 +756,14 @@ class EmailExtractionEngine:
                 "subject": subject,
                 "name_source": "graph_sender" if graph_sender_name.strip() else ("body" if contact_name else ""),
                 "name_confidence": 0.95 if graph_sender_name.strip() else (0.45 if contact_name else 0.0),
+                "organisation_source": org_source,
+                "organisation_confidence": 0.90 if signature and organisation_name else (0.55 if organisation_name else 0.0),
+                "mobile_source": "signature" if mobile_numbers and signature else ("body" if mobile_numbers else ""),
+                "mobile_confidence": 0.90 if mobile_numbers and signature else (0.45 if mobile_numbers else 0.0),
+                "designation_source": "signature" if designation and signature else ("body" if designation else ""),
+                "designation_confidence": 0.90 if designation and signature else (0.0 if not designation else 0.35),
+                "cleaned_preview": cleaned_text[:500] if getattr(config, "DEBUG", False) else "",
+                "signature_preview": signature[:500] if getattr(config, "DEBUG", False) else "",
             }
             LOGGER.info("Extraction complete for %d characters of email content.", len(cleaned_text))
             return result
