@@ -15,6 +15,8 @@ EXCEL_FILE_NAME = "customer_report.xlsx"
 WORKSHEET_NAME = "Customer Report"
 
 COLUMN_MAPPING = {
+    "sender_name": "Sender Name",
+    "receiver_name": "Receiver Name",
     "contact_person_name": "Customer Name",
     "email_id": "Email ID",
     "organisation_name": "Organisation",

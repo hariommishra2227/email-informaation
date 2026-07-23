@@ -99,6 +99,7 @@ def _secret_value(name: str, default: str = "") -> str:
     return default
 
 
+# LLM/Bedrock integration is preserved but disabled by configuration during the Streamlit-only testing phase.
 LLM_ENABLED = _secret_value("LLM_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
 LLM_PROVIDER = _secret_value("LLM_PROVIDER", "openai")
 LLM_API_KEY = _secret_value("LLM_API_KEY", "")

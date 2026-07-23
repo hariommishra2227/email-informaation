@@ -182,6 +182,7 @@ def _initialize_database(db_path: Path | str | None = None) -> None:
 
 
 PROVENANCE_COLUMNS = {
+    "sender_name": "TEXT DEFAULT ''", "receiver_name": "TEXT DEFAULT ''",
     "name_source": "TEXT DEFAULT ''", "name_confidence": "REAL DEFAULT 0", "name_evidence": "TEXT DEFAULT ''",
     "email_source": "TEXT DEFAULT ''", "email_confidence": "REAL DEFAULT 0", "email_evidence": "TEXT DEFAULT ''",
     "organisation_source": "TEXT DEFAULT ''", "organisation_confidence": "REAL DEFAULT 0", "organisation_evidence": "TEXT DEFAULT ''",

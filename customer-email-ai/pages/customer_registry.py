@@ -17,6 +17,8 @@ except Exception as exc:  # pragma: no cover
 
 
 DISPLAY_COLUMNS = {
+    "sender_name": "Sender Name",
+    "receiver_name": "Receiver Name",
     "contact_name": "Name",
     "organisation": "Organisation",
     "email": "Email",

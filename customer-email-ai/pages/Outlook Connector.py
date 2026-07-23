@@ -543,6 +543,8 @@ def _render_customer_preview(user_id: str) -> None:
         return
     preview = pd.DataFrame(rows)
     column_map = {
+        "sender_name": "Sender Name",
+        "receiver_name": "Receiver Name",
         "contact_name": "Contact Name",
         "organisation": "Organisation",
         "email": "Email",
