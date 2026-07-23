@@ -67,14 +67,14 @@ def render(user_id: str) -> None:
 
     st.write("")
     try:
-        limit, search_text, read_filter, date_range, received_after, received_before = _render_filters()
+        folder, date_filter, date_range, limit, search_text, skip_internal, received_after, received_before = _render_filters()
     except Exception as exc:
         LOGGER.exception("Outlook filters failed to render.")
         st.error(_safe_render_exception_message(exc, "Outlook filters"))
         return
 
     try:
-        _render_enterprise_sync(user_id, received_after, received_before)
+        _render_enterprise_sync(user_id, received_after, received_before, limit, folder)
     except Exception as exc:
         LOGGER.exception("Enterprise mailbox synchronization panel failed.")
         st.error(_safe_render_exception_message(exc, "Mailbox synchronization"))
@@ -270,7 +270,7 @@ def _render_quick_actions(user_id: str) -> tuple[bool, bool, bool]:
     return refresh_clicked, import_selected_clicked, import_unread_clicked
 
 
-def _render_enterprise_sync(user_id: str, received_after: str | None, received_before: str | None) -> None:
+def _render_enterprise_sync(user_id: str, received_after: str | None, received_before: str | None, limit: int = 100, folder: str = "Inbox") -> None:
     """Render persistent mailbox sync status without changing existing inbox actions."""
     st.subheader("Sync Status")
     statistics = database_statistics()
@@ -283,7 +283,7 @@ def _render_enterprise_sync(user_id: str, received_after: str | None, received_b
         st.metric("Processed Emails", statistics.get("processed_emails", 0))
 
     select_all = st.checkbox("Select All Emails", key="select_all_outlook_emails")
-    if not st.button("Extract Selected Emails", use_container_width=True):
+    if not st.button("Extract Customer Data", use_container_width=True):
         _render_sync_result()
         return
     if not select_all:
@@ -293,7 +293,7 @@ def _render_enterprise_sync(user_id: str, received_after: str | None, received_b
     progress_bar = st.progress(0)
 
     job_id = str(uuid5(NAMESPACE_URL, f"outlook:{user_id}:{received_after or ''}:{received_before or ''}"))
-    job = LargeMailboxSynchronizer(user_id, 1000, job_id=job_id, batch_size=100, received_after=received_after, received_before=received_before)
+    job = LargeMailboxSynchronizer(user_id, limit, job_id=job_id, batch_size=100, received_after=received_after, received_before=received_before)
     st.session_state["large_mailbox_job_id"] = job.job_id
     result = job.run(progress=lambda current: progress_bar.progress(min(0.99, current.fetched / max(1000, current.fetched))))
     progress_bar.progress(1.0)
@@ -336,14 +336,20 @@ def _render_sync_result() -> None:
             st.metric(label, value)
 
 
-def _render_filters() -> tuple[int, str, str, tuple[date, date] | list, str | None, str | None]:
-    """Render the existing date controls used by mailbox extraction."""
-    st.subheader("Email Date Filter")
-    date_filter = st.radio(
-        "Fetch emails received",
-        ["No date filter", "Last 7 Days", "Last 30 Days", "Custom Date Range"],
-        horizontal=True,
-    )
+def _render_filters() -> tuple[str, str, tuple[date, date] | list, int, str, bool, str | None, str | None]:
+    """Render the email folder, date, volume, and filtering controls."""
+    st.subheader("Email Filters")
+    controls = st.columns(4)
+    with controls[0]:
+        folder = st.selectbox("Email Folder", ["Inbox", "Sent Items", "Archive", "Drafts"])
+    with controls[1]:
+        date_filter = st.selectbox("Date Filter", ["All Emails", "Last 7 Days", "Last 30 Days", "Last 90 Days", "Custom Date Range"])
+    with controls[2]:
+        limit = int(st.number_input("Maximum Emails", min_value=10, max_value=5000, value=100, step=10))
+    with controls[3]:
+        skip_internal = st.checkbox("Skip Internal Emails", value=True)
+    search_text = st.text_input("Search sender or subject", "")
+    date_range: tuple[date, date] | list = []
     received_after = None
     received_before = None
     if date_filter == "Custom Date Range":
@@ -353,15 +359,15 @@ def _render_filters() -> tuple[int, str, str, tuple[date, date] | list, str | No
             if start_date <= end_date:
                 received_after = datetime.combine(start_date, datetime.min.time(), tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
                 received_before = datetime.combine(end_date + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
-    elif date_filter in {"Last 7 Days", "Last 30 Days"}:
-        days = 7 if date_filter == "Last 7 Days" else 30
+    elif date_filter in {"Last 7 Days", "Last 30 Days", "Last 90 Days"}:
+        days = int(date_filter.split()[1])
         start_date = date.today() - timedelta(days=days - 1)
         received_after = datetime.combine(start_date, datetime.min.time(), tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
         received_before = datetime.combine(date.today() + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
-    return 1000, "", "All", [], received_after, received_before
+    return folder, date_filter, date_range, limit, search_text, skip_internal, received_after, received_before
 
 
-def _filter_messages(messages: list, search_text: str, read_filter: str, date_range: tuple[date, date] | list) -> list:
+def _filter_messages(messages: list, search_text: str, date_filter: str, date_range: tuple[date, date] | list) -> list:
     """Filter Outlook messages by business-facing controls."""
     filtered = messages
     if search_text.strip():
@@ -372,9 +378,6 @@ def _filter_messages(messages: list, search_text: str, read_filter: str, date_ra
             or needle in message.sender_email.lower()
             or needle in message.subject.lower()
         ]
-    if read_filter != "All":
-        want_read = read_filter == "Read"
-        filtered = [message for message in filtered if message.is_read is want_read]
     if isinstance(date_range, tuple) and len(date_range) == 2:
         start_date, end_date = date_range
         filtered = [

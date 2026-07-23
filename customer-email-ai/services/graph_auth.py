@@ -348,10 +348,11 @@ def logout_user(clear_persisted: bool = True) -> None:
     st.session_state[USER_STATE_KEY] = {}
     st.session_state[AUTH_STATE_KEY] = ""
     st.session_state[AUTH_ERROR_STATE_KEY] = ""
-    st.session_state["outlook_messages_cache"] = []
-    st.session_state["selected_outlook_messages"] = []
-    st.session_state["outlook_selected_messages"] = []
-    st.session_state["outlook_import_summary"] = None
+    st.session_state.pop("outlook_messages_cache", None)
+    st.session_state.pop("selected_outlook_messages", None)
+    st.session_state.pop("outlook_selected_messages", None)
+    st.session_state.pop("imported_outlook_message_ids", None)
+    st.session_state.pop("outlook_import_summary", None)
     st.session_state[SILENT_RESULT_STATE_KEY] = ""
     st.session_state[TOKEN_CACHE_OWNER_STATE_KEY] = ""
     st.session_state[ACCOUNT_HOME_ID_STATE_KEY] = ""
