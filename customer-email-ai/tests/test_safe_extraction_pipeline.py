@@ -33,3 +33,8 @@ def test_business_domain_can_supply_organisation():
     result = EmailExtractionEngine().extract("Hello", graph_sender_email="person@northwind.example")
     assert result["organisation_name"] == "Northwind"
 
+
+def test_designation_requires_latest_signature():
+    engine = EmailExtractionEngine()
+    assert engine.extract("Our project manager will respond shortly.")["designation"] == ""
+    assert engine.extract("Please contact us.\nRegards\nAnita Rao\nProject Manager")["designation"] == "Project Manager"
