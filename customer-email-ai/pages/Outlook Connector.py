@@ -396,8 +396,19 @@ def _render_inbox_list(messages: list, status_rows: dict[str, str]) -> list[str]
         st.session_state["outlook_selected_messages"] = []
         return []
 
-    select_all = st.checkbox("Select All", key="select_all_outlook_messages")
-    selected_message_ids = _update_selected_outlook_messages(messages, select_all)
+    action_cols = st.columns(2)
+    with action_cols[0]:
+        select_all_clicked = st.button("Select All Loaded Emails", key="select_all_loaded_outlook", use_container_width=True)
+    with action_cols[1]:
+        clear_clicked = st.button("Clear Selection", key="clear_outlook_selection", use_container_width=True)
+    if select_all_clicked:
+        selected_message_ids = select_all_loaded_message_ids(messages)
+        st.success(f"{len(selected_message_ids)} visible emails selected.")
+    elif clear_clicked:
+        selected_message_ids = clear_selected_message_ids()
+        st.success("Selection cleared.")
+    else:
+        selected_message_ids = _selected_message_ids()
     selected_message_ids = st.session_state.get("selected_outlook_messages", [])
     table_rows = [
         {
@@ -418,17 +429,38 @@ def _render_inbox_list(messages: list, status_rows: dict[str, str]) -> list[str]
         pd.DataFrame(table_rows),
         hide_index=True,
         use_container_width=True,
+        key="outlook_message_selection_table",
         disabled=disabled_columns,
         column_config={
             "Select": st.column_config.CheckboxColumn("Select"),
             "Message ID": st.column_config.TextColumn("Message ID", disabled=True),
         },
     )
-    selected_ids = edited.loc[edited["Select"], "Message ID"].tolist() if not edited.empty else []
+    selected_ids = unique_message_ids(edited.loc[edited["Select"], "Message ID"].tolist() if not edited.empty else [])
     st.session_state["selected_outlook_messages"] = selected_ids
     st.session_state["outlook_selected_messages"] = selected_ids
     st.caption(f"{len(messages)} fetched. {len(selected_ids)} selected. Status is refreshed after extraction.")
     return selected_ids
+
+
+def unique_message_ids(message_ids: list[str]) -> list[str]:
+    """Return non-empty message IDs once, preserving their loaded-list order."""
+    return list(dict.fromkeys(str(message_id) for message_id in message_ids if str(message_id)))
+
+
+def select_all_loaded_message_ids(messages: list) -> list[str]:
+    """Select only the currently loaded/visible messages, regardless of read state."""
+    selected_ids = unique_message_ids([message.message_id for message in messages])
+    st.session_state["selected_outlook_messages"] = selected_ids
+    st.session_state["outlook_selected_messages"] = selected_ids
+    return selected_ids
+
+
+def clear_selected_message_ids() -> list[str]:
+    """Clear the central selection state without fetching or extracting messages."""
+    st.session_state["selected_outlook_messages"] = []
+    st.session_state["outlook_selected_messages"] = []
+    return []
 
 
 def _update_selected_outlook_messages(messages: list, select_all: bool) -> list[str]:
