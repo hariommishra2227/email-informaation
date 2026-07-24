@@ -20,6 +20,16 @@ from llm_extractor import extract_with_llm
 LOGGER = logging.getLogger(__name__)
 INTERNAL_DOMAIN = "itsipl.com"
 
+def _normalize_graph_datetime(value: str) -> str:
+    try:
+        return datetime.fromisoformat(str(value or "").replace("Z", "+00:00")).strftime("%d-%b-%Y %H:%M") if value else ""
+    except ValueError:
+        return str(value or "")
+
+def _normalize_graph_email(value: str) -> str:
+    value = re.sub(r"(?i)^mailto:", "", str(value or "").strip()).strip("<> ").rstrip(",;.: ").lower()
+    return value if _looks_like_valid_email(value) else ""
+
 
 def clean_html_to_text(body: str) -> str:
     """Convert HTML-only or mixed email body content into plain text."""
@@ -73,6 +83,7 @@ def build_customer_record(
     sender_name: str = "",
     receiver_name: str = "",
     subject: str = "",
+    received_datetime: str = "",
     engine: EmailExtractionEngine | None = None,
 ) -> CustomerRecord:
     """Extract and normalize one customer record from text."""
@@ -99,13 +110,13 @@ def build_customer_record(
                 if confidence_key:
                     extracted[confidence_key] = float(item.get("confidence", 0))
 
-    email = str(extracted.get("email_id") or extracted.get("email") or "").strip()
+    email = _normalize_graph_email(sender_email) or _normalize_graph_email(str(extracted.get("email_id") or extracted.get("email") or ""))
     if not email and _looks_like_valid_email(sender_email) and not sender_email.lower().endswith("@" + INTERNAL_DOMAIN):
         email = sender_email.strip()
 
-    contact_name = str(extracted.get("contact_person_name") or extracted.get("name") or "").strip()
-    if not contact_name:
-        contact_name = sender_name.strip()
+    contact_name = sender_name.strip()
+    if not contact_name and not sender_email:
+        contact_name = str(extracted.get("contact_person_name") or extracted.get("name") or "").strip()
 
     customer_values = {
         "contact_name": contact_name,
@@ -139,6 +150,7 @@ def build_customer_record(
         designation=customer_values["designation"],
         address=customer_values["address"],
         subject=customer_values["subject"],
+        email_date=_normalize_graph_datetime(received_datetime),
         source=source,
         source_message_id=source_message_id,
         confidence=confidence,
@@ -162,7 +174,7 @@ def build_customer_record(
         address_confidence=float(extracted.get("address_confidence", 0.60) or 0) if customer_values["address"] else 0.0,
         address_evidence=llm_result.get("fields", {}).get("address", {}).get("evidence", "") or customer_values["address"],
         review_status=review_status,
-        sender_email=sender_email,
+        sender_email=_normalize_graph_email(sender_email),
         sender_name=sender_name.strip(),
         receiver_name=receiver_name.strip(),
         sender_domain=config.get_email_domain(sender_email),
@@ -219,6 +231,7 @@ def process_outlook_message(
             sender_name=message.sender_name,
             receiver_name=message.receiver_name,
             subject=message.subject,
+            received_datetime=message.received_datetime,
             engine=engine,
         )
         database.insert_customer(customer)

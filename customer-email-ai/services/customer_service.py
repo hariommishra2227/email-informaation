@@ -19,26 +19,15 @@ def get_customers(user_id: str | None = None) -> list[dict[str, Any]]:
     return database.list_customers(user_id)
 
 
+BUSINESS_COLUMNS = ("Client Name", "Contact Person Name", "Contact Email", "Phone Number", "Full Address", "Location", "Subject", "Email Date")
+
+def to_business_output(record: dict[str, Any] | CustomerRecord) -> dict[str, Any]:
+    row = record if isinstance(record, dict) else record.__dict__
+    return {"Client Name": row.get("organisation", ""), "Contact Person Name": row.get("sender_name") or row.get("contact_name", ""),
+            "Contact Email": row.get("sender_email") or row.get("email", ""), "Phone Number": row.get("mobile", ""),
+            "Full Address": row.get("address", ""), "Location": row.get("location", ""), "Subject": row.get("subject", ""),
+            "Email Date": row.get("email_date", row.get("received_datetime", ""))}
+
 def to_export_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Convert database rows into the existing Excel export schema."""
-    export_rows: list[dict[str, Any]] = []
-    for row in rows:
-        export_rows.append(
-            {
-                "contact_person_name": row.get("contact_name", ""),
-                "sender_name": row.get("sender_name", ""),
-                "receiver_name": row.get("receiver_name", ""),
-                "organisation_name": row.get("organisation", ""),
-                "email_id": row.get("email", ""),
-                "mobile_number": row.get("mobile", ""),
-                "normalized_phone": row.get("normalized_mobile", ""),
-                "designation": row.get("designation", ""),
-                "address": row.get("address", ""),
-                "subject": row.get("subject", ""),
-                "input_source": row.get("source", ""),
-                "extraction_confidence": row.get("confidence", ""),
-                "duplicate_status": row.get("status", ""),
-                "confidence_score": 100 if row.get("status") == "Duplicate" else 0,
-            }
-        )
-    return export_rows
+    return [to_business_output(row) for row in rows]

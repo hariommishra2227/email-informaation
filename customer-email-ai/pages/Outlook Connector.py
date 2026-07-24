@@ -19,7 +19,7 @@ try:
     from excel_exporter import EXCEL_FILE_NAME, export_customers_to_excel
     from page_context import initialize_outlook_session_state
     from services import graph_auth, graph_client
-    from services.customer_service import get_customers, to_export_rows
+    from services.customer_service import get_customers, to_export_rows, to_business_output, BUSINESS_COLUMNS
     from services.email_processor import process_outlook_message
     from storage import database
     from sync import MailboxSynchronizer, database_statistics
@@ -544,20 +544,7 @@ def _render_customer_preview(user_id: str) -> None:
     if not rows:
         st.info("Extracted Outlook customer records will appear here after import.")
         return
-    preview = pd.DataFrame(rows)
-    column_map = {
-        "sender_name": "Sender Name",
-        "receiver_name": "Receiver Name",
-        "contact_name": "Contact Name",
-        "organisation": "Organisation",
-        "email": "Email",
-        "mobile": "Mobile",
-        "designation": "Designation",
-        "subject": "Subject",
-        "source": "Source",
-        "status": "Status",
-    }
-    preview = preview[[column for column in column_map if column in preview.columns]].rename(columns=column_map)
+    preview = pd.DataFrame([to_business_output(row) for row in rows], columns=BUSINESS_COLUMNS)
     st.dataframe(preview, hide_index=True, use_container_width=True)
     st.download_button(
         "Download Excel Report",
