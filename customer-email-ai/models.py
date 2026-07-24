@@ -46,7 +46,9 @@ class CustomerRecord:
     normalized_mobile: str = ""
     designation: str = ""
     address: str = ""
+    location: str = ""
     subject: str = ""
+    email_date: str = ""
     source: str = "Manual"
     source_message_id: str = ""
     confidence: int = 0

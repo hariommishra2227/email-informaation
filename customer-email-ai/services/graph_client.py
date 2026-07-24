@@ -191,7 +191,8 @@ def _outlook_message_from_graph_item(user_id: str, item: dict[str, Any]) -> Outl
     if not message_id:
         LOGGER.warning("Graph message without id was skipped.")
         return None
-    sender = (item.get("from") or {}).get("emailAddress", {}) or {}
+    sender = item.get("from") or {}
+    sender = sender.get("emailAddress") or {}
     if config.is_internal_sender(str(sender.get("address") or "")):
         LOGGER.info("Skipping internal Outlook message before body extraction message_id=%s.", message_id)
         return None
@@ -200,7 +201,7 @@ def _outlook_message_from_graph_item(user_id: str, item: dict[str, Any]) -> Outl
         message_id=message_id,
         user_id=user_id,
         sender_name=str(sender.get("name") or ""),
-        sender_email=str(sender.get("address") or ""),
+        sender_email=str(sender.get("address") or "").strip().lower(),
         receiver_name=_receiver_names_from_graph_item(item),
         subject=str(item.get("subject") or ""),
         body=_body_to_text(str(body_info.get("content") or ""), str(body_info.get("contentType") or "")),

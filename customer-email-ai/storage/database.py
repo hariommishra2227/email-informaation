@@ -191,7 +191,7 @@ PROVENANCE_COLUMNS = {
     "address_source": "TEXT DEFAULT ''", "address_confidence": "REAL DEFAULT 0", "address_evidence": "TEXT DEFAULT ''",
     "extraction_method": "TEXT DEFAULT 'regex_spacy'", "llm_used": "INTEGER DEFAULT 0", "llm_model": "TEXT DEFAULT ''", "llm_error": "TEXT DEFAULT ''",
     "review_status": "TEXT DEFAULT 'Needs Review'", "reviewed_at": "TEXT DEFAULT ''", "reviewed_by": "TEXT DEFAULT ''", "correction_notes": "TEXT DEFAULT ''",
-    "internet_message_id": "TEXT DEFAULT ''", "sender_email": "TEXT DEFAULT ''", "sender_domain": "TEXT DEFAULT ''", "processed_at": "TEXT DEFAULT ''",
+    "internet_message_id": "TEXT DEFAULT ''", "sender_email": "TEXT DEFAULT ''", "sender_domain": "TEXT DEFAULT ''", "processed_at": "TEXT DEFAULT ''", "email_date": "TEXT DEFAULT ''", "location": "TEXT DEFAULT ''",
 }
 
 

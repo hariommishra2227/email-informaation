@@ -10,28 +10,13 @@ import streamlit as st
 IMPORT_ERROR: Exception | None = None
 try:
     from excel_exporter import EXCEL_FILE_NAME, export_customers_to_excel
-    from services.customer_service import get_customers, to_export_rows
+    from services.customer_service import get_customers, to_export_rows, to_business_output, BUSINESS_COLUMNS
     from storage import database
 except Exception as exc:  # pragma: no cover
     IMPORT_ERROR = exc
 
 
-DISPLAY_COLUMNS = {
-    "sender_name": "Sender Name",
-    "receiver_name": "Receiver Name",
-    "contact_name": "Name",
-    "organisation": "Organisation",
-    "email": "Email",
-    "mobile": "Mobile",
-    "designation": "Designation",
-    "address": "Address",
-    "subject": "Subject",
-    "source": "Source",
-    "confidence": "Confidence",
-    "status": "Status",
-    "created_at": "Imported Date",
-    "user_id": "User ID",
-}
+DISPLAY_COLUMNS = BUSINESS_COLUMNS
 
 
 def render(user_id: str) -> None:
@@ -61,8 +46,7 @@ def render(user_id: str) -> None:
         st.info("No customers match the current filters.")
         return
 
-    display = pd.DataFrame(rows)
-    display = display[[column for column in DISPLAY_COLUMNS if column in display.columns]].rename(columns=DISPLAY_COLUMNS)
+    display = pd.DataFrame([to_business_output(row) for row in rows], columns=DISPLAY_COLUMNS)
     st.dataframe(display, hide_index=True, use_container_width=True)
 
     st.subheader("Review Queue")
