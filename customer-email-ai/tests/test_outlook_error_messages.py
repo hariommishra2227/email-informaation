@@ -352,6 +352,53 @@ def test_connection_panel_enables_disconnect_when_valid_token(monkeypatch) -> No
     assert ("Disconnect", False) in buttons
 
 
+def test_connection_panel_displays_username_when_only_username_exists(monkeypatch) -> None:
+    """Personal-account MSAL metadata can expose the signed-in address as username only."""
+    page = _load_outlook_page()
+
+    account = _render_connection_panel_account_metric(
+        monkeypatch,
+        page,
+        {"username": "personal@example.com"},
+    )
+
+    assert account == "personal@example.com"
+    assert account != "Not connected"
+
+
+def test_connection_panel_prefers_mail_when_present(monkeypatch) -> None:
+    """The connected account label should prefer the Graph mail field."""
+    page = _load_outlook_page()
+
+    account = _render_connection_panel_account_metric(
+        monkeypatch,
+        page,
+        {
+            "mail": "mail@example.com",
+            "userPrincipalName": "upn@example.com",
+            "username": "username@example.com",
+        },
+    )
+
+    assert account == "mail@example.com"
+
+
+def test_connection_panel_uses_user_principal_name_when_mail_absent(monkeypatch) -> None:
+    """The connected account label should fall back to userPrincipalName before username."""
+    page = _load_outlook_page()
+
+    account = _render_connection_panel_account_metric(
+        monkeypatch,
+        page,
+        {
+            "userPrincipalName": "upn@example.com",
+            "username": "username@example.com",
+        },
+    )
+
+    assert account == "upn@example.com"
+
+
 def test_connection_panel_treats_expired_token_as_sign_in_available(monkeypatch) -> None:
     """Expired or unusable auth should leave Sign in available and Disconnect disabled."""
     page = _load_outlook_page()
@@ -422,6 +469,98 @@ def test_connection_panel_treats_expired_token_as_sign_in_available(monkeypatch)
     assert ("Disconnect", True) in buttons
 
 
+def test_refresh_session_defaults_do_not_overwrite_auth_keys(monkeypatch) -> None:
+    """Normal Streamlit reruns should preserve Outlook auth state values."""
+    page = _load_outlook_page()
+
+    class FakeStreamlit:
+        session_state = {
+            "outlook_messages_cache": ["cached-message"],
+            "outlook_selected_messages": ["message-1"],
+            "outlook_access_token": "session-token",
+            "outlook_token_expiry": 4102444800,
+            "outlook_authenticated_cache_owner": "account:owner",
+            "outlook_home_account_id": "home-1",
+            "outlook_connected_user": {"username": "user@example.com"},
+        }
+
+    monkeypatch.setattr(page, "st", FakeStreamlit)
+
+    page._ensure_refresh_session_defaults()
+
+    assert FakeStreamlit.session_state["outlook_messages_cache"] == ["cached-message"]
+    assert FakeStreamlit.session_state["outlook_selected_messages"] == ["message-1"]
+    assert FakeStreamlit.session_state["outlook_access_token"] == "session-token"
+    assert FakeStreamlit.session_state["outlook_token_expiry"] == 4102444800
+    assert FakeStreamlit.session_state["outlook_authenticated_cache_owner"] == "account:owner"
+    assert FakeStreamlit.session_state["outlook_home_account_id"] == "home-1"
+    assert FakeStreamlit.session_state["outlook_connected_user"] == {"username": "user@example.com"}
+
+
+def _render_connection_panel_account_metric(monkeypatch, page, account_data: dict[str, str]) -> str:
+    """Render the connection panel and return the visible Connected account metric."""
+    metrics: dict[str, str] = {}
+    _configure_live_connection_panel(monkeypatch, page, is_connected=True)
+    monkeypatch.setattr(page.graph_auth, "connected_user", lambda: dict(account_data))
+
+    class FakeColumn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeStreamlit:
+        session_state = {}
+        query_params = {}
+
+        @staticmethod
+        def subheader(*args, **kwargs):
+            return None
+
+        @staticmethod
+        def columns(spec):
+            return [FakeColumn() for _ in spec]
+
+        @staticmethod
+        def metric(label, value, *args, **kwargs):
+            metrics[str(label)] = str(value)
+            return None
+
+        @staticmethod
+        def button(*args, **kwargs):
+            return False
+
+        @staticmethod
+        def link_button(*args, **kwargs):
+            raise AssertionError("Sign-in link should not render while connected")
+
+        @staticmethod
+        def error(*args, **kwargs):
+            return None
+
+        @staticmethod
+        def warning(*args, **kwargs):
+            return None
+
+        @staticmethod
+        def caption(*args, **kwargs):
+            return None
+
+        @staticmethod
+        def write(*args, **kwargs):
+            return None
+
+        @staticmethod
+        def expander(*args, **kwargs):
+            return FakeColumn()
+
+    monkeypatch.setattr(page, "st", FakeStreamlit)
+
+    assert page._render_connection_panel()
+    return metrics["Connected account"]
+
+
 def _configure_live_connection_panel(monkeypatch, page, is_connected: bool) -> None:
     """Patch a configured live Outlook panel without real Microsoft calls."""
     monkeypatch.setattr(page.config, "is_mock_mode", lambda: False)
@@ -445,7 +584,7 @@ def _configure_live_connection_panel(monkeypatch, page, is_connected: bool) -> N
         lambda: {
             "persisted_cache_exists": "Yes" if is_connected else "No",
             "accounts_found": "1" if is_connected else "0",
-            "silent_token_result": "access_token" if is_connected else "not_run",
+            "silent_token_result": "success" if is_connected else "not_run",
             "cache_saved_after_callback": "No",
             "cache_owner": "default_user",
             "stored_account": "Yes" if is_connected else "No",

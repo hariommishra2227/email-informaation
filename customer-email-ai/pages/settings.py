@@ -16,31 +16,23 @@ def render() -> None:
     """Render the Settings page."""
     st.title("Settings")
     if IMPORT_ERROR is not None:
-        st.error("Settings could not load. Please check the application setup.")
+        st.error(f"Settings import failed: {IMPORT_ERROR}")
         return
     rows = {
-        "Application Mode": "Demo Mode" if config.is_mock_mode() else "Real Mode",
-        "Outlook Account Support": "Work/School and Personal Microsoft accounts",
-        "Connection Status": _connection_status(),
-        "Application Version": "1.0",
+        "Outlook mode": config.OUTLOOK_MODE,
+        "Default application user": config.APP_USER_EMAIL,
+        "Database path": str(config.DATABASE_PATH),
+        "Tenant configured": "Yes" if config.TENANT_ID else "No",
+        "Client ID configured": "Yes" if config.CLIENT_ID else "No",
+        "Client Secret configured": "Yes" if config.CLIENT_SECRET else "No",
+        "Redirect URI": config.REDIRECT_URI,
     }
     for label, value in rows.items():
         st.write(f"**{label}:** {value}")
 
-    st.subheader("Microsoft Outlook Configuration")
-    status_rows = {
-        "Client ID configured": "Yes" if config.CLIENT_ID else "No",
-        "Client Secret configured": "Yes" if config.CLIENT_SECRET else "No",
-        "Tenant ID configured": "Yes" if config.TENANT_ID else "No",
-        "Redirect URI configured": "Yes" if config.REDIRECT_URI else "No",
-        "Outlook live mode ready": "Yes" if config.is_microsoft_configured() else "No",
-    }
-    for label, value in status_rows.items():
-        st.write(f"**{label}:** {value}")
-
-    if st.button("Test Configuration", type="primary"):
+    if st.button("Test Connection", type="primary"):
         if config.is_mock_mode():
-            st.success("Demo mode is ready.")
+            st.success("Mock Outlook connection successful.")
         else:
             missing = config.missing_live_settings()
             if missing:

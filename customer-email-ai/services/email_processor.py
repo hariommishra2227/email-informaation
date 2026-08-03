@@ -60,7 +60,6 @@ def calculate_confidence(customer: dict[str, Any]) -> int:
 
 def _status_for_customer(user_id: str, normalized_email: str, normalized_mobile: str, confidence: int) -> str:
     """Classify a customer while retaining duplicate rows in the registry."""
-    database.initialize_database()
     if database.customer_duplicate_exists(user_id, normalized_email, normalized_mobile):
         return "Duplicate"
     if confidence < 45:

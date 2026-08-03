@@ -137,7 +137,22 @@ def _first_value(*names: str, default: str = "") -> str:
     return default
 
 BASE_DIR = Path(__file__).resolve().parent
+APP_ENV = _secret_value("APP_ENV", "development").strip().lower() or "development"
+DATABASE_URL = _secret_value("DATABASE_URL", "").strip()
 DATABASE_PATH = Path(_secret_value("DATABASE_PATH", str(BASE_DIR / "customer_data.db")))
+EMAIL_FETCH_BATCH_SIZE = int(_secret_value("EMAIL_FETCH_BATCH_SIZE", "250") or "250")
+EMAIL_PROCESS_BATCH_SIZE = int(_secret_value("EMAIL_PROCESS_BATCH_SIZE", "100") or "100")
+JOB_BACKEND = _secret_value("JOB_BACKEND", "local").strip().lower() or "local"
+STORAGE_BACKEND = _secret_value("STORAGE_BACKEND", "local").strip().lower() or "local"
+AWS_REGION = _secret_value("AWS_REGION", "ap-south-1").strip() or "ap-south-1"
+AWS_S3_BUCKET = _secret_value("AWS_S3_BUCKET", "").strip()
+AWS_SQS_QUEUE_URL = _secret_value("AWS_SQS_QUEUE_URL", "").strip()
+LOG_LEVEL = _secret_value("LOG_LEVEL", "INFO").strip().upper() or "INFO"
+LOCAL_ATTACHMENT_DIR = Path(_secret_value("LOCAL_ATTACHMENT_DIR", str(BASE_DIR / "local_attachments")))
+EXPORT_LIMIT = int(_secret_value("EXPORT_LIMIT", "100000") or "100000")
+EXPORT_CHUNK_SIZE = int(_secret_value("EXPORT_CHUNK_SIZE", "1000") or "1000")
+DB_POOL_SIZE = int(_secret_value("DB_POOL_SIZE", "5") or "5")
+DB_MAX_OVERFLOW = int(_secret_value("DB_MAX_OVERFLOW", "10") or "10")
 
 OUTLOOK_MODE_MOCK = "mock"
 OUTLOOK_MODE_LIVE = "live"
@@ -162,7 +177,7 @@ AZURE_CLIENT_ID = _secret_value("AZURE_CLIENT_ID", "").strip()
 AZURE_CLIENT_SECRET = _secret_value("AZURE_CLIENT_SECRET", "").strip()
 AZURE_REDIRECT_URI = _secret_value(
     "AZURE_REDIRECT_URI",
-    "https://email-informaation-frmrxrcergpwxbvh5lcqux.streamlit.app/Outlook_Connector",
+    "http://localhost:8501",
 ).strip()
 AZURE_AUTHORITY = _secret_value(
     "AZURE_AUTHORITY",
@@ -189,9 +204,10 @@ AUTHORITY = RESOLVED_AUTHORITY
 # Backward-compatible aliases for older code paths and tests.
 AZURE_TENANT_ID = TENANT_ID
 
+_configured_scopes = _secret_value("MICROSOFT_GRAPH_SCOPES", "User.Read,Mail.Read")
 GRAPH_SCOPES = [
-    "https://graph.microsoft.com/User.Read",
-    "https://graph.microsoft.com/Mail.Read",
+    scope if scope.startswith("https://") else f"https://graph.microsoft.com/{scope}"
+    for scope in [item.strip() for item in _configured_scopes.split(",") if item.strip()]
 ]
 OUTLOOK_MODE = OUTLOOK_MODE_LIVE if CONFIGURED_OUTLOOK_MODE == OUTLOOK_MODE_LIVE else OUTLOOK_MODE_MOCK
 APP_PAGE_ICON = "📧"

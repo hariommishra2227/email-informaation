@@ -21,7 +21,7 @@ class OutlookMessage:
     body_preview: str = ""
     has_attachments: bool = False
     attachment_names: list[str] = field(default_factory=list)
-    receiver_name: str = ""
+    internet_message_id: str = ""
 
     @property
     def attachment_count(self) -> int:

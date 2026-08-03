@@ -1,0 +1,16 @@
+.env
+*.env
+.streamlit/secrets.toml
+*.db
+*.sqlite
+*.xlsx
+__pycache__/
+.pytest_cache/
+.compile_cache/
+pytest-cache-files-*/
+test_customer_data_*.db*
+local_attachments/
+exports/
+.git/
+tests/
+test_*.py

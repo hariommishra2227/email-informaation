@@ -3,10 +3,16 @@
 .streamlit/secrets.toml
 *.db
 *.sqlite
+*.sqlite3
 customer_data.db
 customer_data.db-journal
+customer_data.db-shm
+customer_data.db-wal
 token_cache*
 msal_cache*
+local_attachments/
+exports/
+*.xlsx
 test_customer_data_*.db
 test_customer_data_*.db-journal
 __pycache__/

@@ -18,12 +18,12 @@ try:
     import config
     from excel_exporter import EXCEL_FILE_NAME, export_customers_to_excel
     from page_context import initialize_outlook_session_state
+    from repository import EmailSyncRepository
     from services import graph_auth, graph_client
     from services.customer_service import get_customers, to_export_rows, to_business_output, BUSINESS_COLUMNS
     from services.email_processor import process_outlook_message
     from storage import database
-    from sync import MailboxSynchronizer, database_statistics
-    from large_mailbox_sync import LargeMailboxSynchronizer
+    from sync import sync_outlook_mailbox
 except Exception as exc:  # pragma: no cover
     IMPORT_ERROR = exc
 
@@ -51,6 +51,7 @@ def _format_received(value: str) -> str:
 def render(user_id: str) -> None:
     """Render the Outlook Inbox page."""
     initialize_outlook_session_state()
+    _ensure_refresh_session_defaults()
     st.title("Customer Email Extraction")
     st.caption("Outlook Connection -> Inbox Emails -> Select Emails -> Extract Customer Information -> Review Extracted Records -> Save to Customer Registry -> Download Excel")
     if IMPORT_ERROR is not None:
@@ -74,10 +75,64 @@ def render(user_id: str) -> None:
         return
 
     try:
-        _render_enterprise_sync(user_id, received_after, received_before, limit, folder)
+        refresh_clicked, import_selected_clicked, import_unread_clicked, sync_clicked = _render_quick_actions(user_id)
     except Exception as exc:
-        LOGGER.exception("Enterprise mailbox synchronization panel failed.")
-        st.error(_safe_render_exception_message(exc, "Mailbox synchronization"))
+        LOGGER.exception("Outlook quick actions failed to render.")
+        st.error(_safe_render_exception_message(exc, "Outlook quick actions"))
+        return
+
+    if sync_clicked:
+        _sync_mailbox(user_id)
+
+    cached_messages = st.session_state.get("outlook_messages_cache", [])
+    if can_load_inbox and (refresh_clicked or not cached_messages):
+        try:
+            messages = graph_client.list_inbox_messages(user_id, limit=int(limit))
+            st.session_state["outlook_messages_cache"] = messages
+        except Exception as exc:
+            LOGGER.exception("Outlook inbox refresh failed.")
+            st.error(_friendly_exception_message(exc))
+            messages = st.session_state.get("outlook_messages_cache", [])[: int(limit)]
+    else:
+        messages = cached_messages[: int(limit)]
+
+    for message in messages:
+        try:
+            database.upsert_outlook_message(message)
+        except Exception:
+            LOGGER.exception("Could not cache Outlook message metadata.")
+
+    try:
+        status_rows = {
+            row["message_id"]: row["processing_status"]
+            for row in database.list_outlook_message_rows(user_id)
+        }
+    except Exception as exc:
+        LOGGER.exception("Could not read Outlook message status rows.")
+        st.error(_safe_render_exception_message(exc, "Outlook message status"))
+        return
+
+    try:
+        filtered = _filter_messages(messages, search_text, read_filter, date_range)
+        selected_ids = _render_inbox_list(filtered, status_rows)
+    except Exception as exc:
+        LOGGER.exception("Outlook inbox list failed to render.")
+        st.error(_safe_render_exception_message(exc, "Outlook inbox list"))
+        return
+
+    if import_selected_clicked:
+        _import_messages(user_id, messages, selected_ids)
+    if import_unread_clicked:
+        _import_messages(user_id, messages, [message.message_id for message in messages if not message.is_read])
+
+    _render_import_result()
+    _render_sync_status()
+    st.write("")
+    try:
+        _render_customer_preview(user_id)
+    except Exception as exc:
+        LOGGER.exception("Outlook customer preview failed to render.")
+        st.error(_safe_render_exception_message(exc, "Outlook customer preview"))
 
 
 def _render_connection_panel() -> bool:
@@ -114,7 +169,12 @@ def _render_connection_panel() -> bool:
         if graph_auth.auth_error():
             st.error(graph_auth.auth_error())
         account_data = graph_auth.connected_user()
-        account = account_data.get("mail") or account_data.get("userPrincipalName") or "Not connected"
+        account = (
+            account_data.get("mail")
+            or account_data.get("userPrincipalName")
+            or account_data.get("username")
+            or "Microsoft account connected"
+        )
 
     status_cols = st.columns([0.2, 0.3, 0.14, 0.2, 0.16])
     with status_cols[0]:
@@ -255,10 +315,10 @@ def _render_login_url_diagnostics(exc: Exception) -> None:
             st.write(f"**{label}:** {value}")
 
 
-def _render_quick_actions(user_id: str) -> tuple[bool, bool, bool]:
+def _render_quick_actions(user_id: str) -> tuple[bool, bool, bool, bool]:
     """Render the business workflow action row."""
     st.subheader("Inbox Emails")
-    action_cols = st.columns([0.25, 0.25, 0.25, 0.25])
+    action_cols = st.columns([0.2, 0.2, 0.2, 0.2, 0.2])
     with action_cols[0]:
         refresh_clicked = st.button("Refresh Inbox", type="primary", use_container_width=True)
     with action_cols[1]:
@@ -266,8 +326,20 @@ def _render_quick_actions(user_id: str) -> tuple[bool, bool, bool]:
     with action_cols[2]:
         import_unread_clicked = st.button("Extract All Unread", use_container_width=True)
     with action_cols[3]:
+        sync_clicked = st.button("Sync New Emails", use_container_width=True)
+    with action_cols[4]:
         _render_excel_export(user_id, label="Export Excel")
-    return refresh_clicked, import_selected_clicked, import_unread_clicked
+    return refresh_clicked, import_selected_clicked, import_unread_clicked, sync_clicked
+
+
+def _ensure_refresh_session_defaults() -> None:
+    """Create refresh-related Outlook defaults without overwriting auth state."""
+    st.session_state.setdefault("outlook_messages_cache", [])
+    st.session_state.setdefault("outlook_selected_messages", [])
+    st.session_state.setdefault("outlook_access_token", None)
+    st.session_state.setdefault("outlook_token_expiry", None)
+    st.session_state.setdefault("outlook_authenticated_cache_owner", None)
+    st.session_state.setdefault("outlook_home_account_id", None)
 
 
 def _render_enterprise_sync(user_id: str, received_after: str | None, received_before: str | None, limit: int = 100, folder: str = "Inbox") -> None:
@@ -543,6 +615,61 @@ def _import_messages(user_id: str, messages: list, message_ids: list[str]) -> No
                 summary["failed_records"] += 1
     st.session_state["imported_outlook_message_ids"] = sorted(imported_ids)
     st.session_state["outlook_import_summary"] = summary
+
+
+def _sync_mailbox(user_id: str) -> None:
+    """Run enterprise full/incremental mailbox synchronization."""
+    st.subheader("Sync Status")
+    progress = st.progress(0)
+
+    def update_progress(processed_count: int, total_count: int) -> None:
+        progress.progress(0 if total_count == 0 else processed_count / total_count)
+
+    try:
+        result = sync_outlook_mailbox(user_id, progress_callback=update_progress)
+        st.session_state["outlook_sync_summary"] = result
+    except Exception as exc:
+        LOGGER.exception("Enterprise mailbox sync failed.")
+        st.session_state["outlook_sync_summary"] = None
+        st.error(_safe_render_exception_message(exc, "Mailbox sync"))
+
+
+def _render_sync_status() -> None:
+    """Render enterprise sync and database statistics."""
+    try:
+        stats = EmailSyncRepository().stats()
+    except Exception as exc:
+        LOGGER.exception("Could not read enterprise database statistics.")
+        st.error(_safe_render_exception_message(exc, "Database statistics"))
+        return
+
+    summary = st.session_state.get("outlook_sync_summary")
+    st.subheader("Database Statistics")
+    stat_cols = st.columns(3)
+    with stat_cols[0]:
+        st.metric("Last Sync Time", stats.get("last_sync_datetime") or "Never")
+    with stat_cols[1]:
+        st.metric("Total Contacts", stats.get("total_contacts", 0))
+    with stat_cols[2]:
+        st.metric("Processed Emails", stats.get("processed_emails", 0))
+
+    if not summary:
+        return
+
+    st.subheader("Sync Status")
+    result_cols = st.columns(6)
+    labels = [
+        ("Processed Emails", "processed_emails"),
+        ("Skipped Emails", "skipped_emails"),
+        ("New Contacts", "new_contacts"),
+        ("Updated Contacts", "updated_contacts"),
+        ("Duplicates Removed", "duplicates_removed"),
+        ("Total Processing Time", "total_processing_time"),
+    ]
+    for index, (label, key) in enumerate(labels):
+        with result_cols[index]:
+            value = getattr(summary, key, 0)
+            st.metric(label, f"{value}s" if key == "total_processing_time" else value)
 
 
 def _render_import_result() -> None:
