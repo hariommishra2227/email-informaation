@@ -49,6 +49,8 @@ jobs:
       - run: python -m compileall .
       - run: python -m alembic -c alembic.ini upgrade head
       - run: python -m alembic -c alembic.ini current
+      - run: python -m alembic -c alembic.ini downgrade -1
+      - run: python -m alembic -c alembic.ini upgrade head
       - run: python -m pytest -q
       - run: python -m pip check
       - run: docker compose --profile worker config
