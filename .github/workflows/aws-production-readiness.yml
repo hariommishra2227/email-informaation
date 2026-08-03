@@ -63,7 +63,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Secret scan
         run: |
-          if git grep -n -E "AKIA[0-9A-Z]{16}|-----BEGIN (RSA |OPENSSH |)PRIVATE KEY-----|client_secret *= *['\"][^'\"]{12,}|refresh_token *= *['\"][^'\"]{12,}"; then
+          # This fixture intentionally uses the literal dummy value "secret-refresh-token".
+          if git grep -n -E "AKIA[0-9A-Z]{16}|-----BEGIN (RSA |OPENSSH |)PRIVATE KEY-----|client_secret *= *['\"][^'\"]{12,}|refresh_token *= *['\"][^'\"]{12,}" -- . ':(exclude)customer-email-ai/tests/test_outlook_error_messages.py'; then
             echo "Potential credential detected in tracked files."
             exit 1
           fi
