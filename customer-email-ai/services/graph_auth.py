@@ -48,6 +48,21 @@ MICROSOFT_GRAPH_AUDIENCES = {
 AUTH_FLOW_TTL_SECONDS = 600
 
 
+def _ensure_mapping_session_state() -> None:
+    """Normalize lightweight test doubles to Streamlit's mapping-like session state."""
+    session_state = getattr(st, "session_state", {})
+    if hasattr(session_state, "get") and hasattr(session_state, "__setitem__"):
+        return
+    values = getattr(session_state, "__dict__", {})
+    try:
+        st.session_state = dict(values)
+    except Exception:
+        st.session_state = {}
+
+
+_ensure_mapping_session_state()
+
+
 def _build_msal_app(token_cache: Any | None = None):
     """Create an MSAL confidential client for live delegated auth."""
     if msal is None:

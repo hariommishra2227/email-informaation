@@ -1,0 +1,44 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8501:8501"
+    environment:
+      APP_ENV: development
+      DATABASE_URL: postgresql+psycopg://app_user:app_password@postgres:5432/customer_email_ai
+      AZURE_CLIENT_ID: ${AZURE_CLIENT_ID:-}
+      AZURE_TENANT_ID: ${AZURE_TENANT_ID:-}
+      AZURE_CLIENT_SECRET: ${AZURE_CLIENT_SECRET:-}
+      AZURE_REDIRECT_URI: ${AZURE_REDIRECT_URI:-http://localhost:8501}
+      MICROSOFT_GRAPH_SCOPES: User.Read,Mail.Read
+      EMAIL_FETCH_BATCH_SIZE: 250
+      EMAIL_PROCESS_BATCH_SIZE: 100
+      JOB_BACKEND: local
+      STORAGE_BACKEND: local
+      AWS_REGION: ap-south-1
+      LOG_LEVEL: INFO
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "from services.health import health_status; raise SystemExit(0 if health_status().get('database') == 'ok' else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: customer_email_ai
+      POSTGRES_USER: app_user
+      POSTGRES_PASSWORD: app_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app_user -d customer_email_ai"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:

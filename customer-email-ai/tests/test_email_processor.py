@@ -70,7 +70,7 @@ def test_duplicate_message_id_is_not_imported_twice(isolated_db: Path) -> None:
 
 
 def test_duplicate_customer_email_is_identified(isolated_db: Path) -> None:
-    """A second customer with the same normalized email is retained as Duplicate."""
+    """A second customer with the same normalized email is not inserted again."""
     first = get_mock_message(config.DEFAULT_USER_ID, "mock-emp1-001")
     assert first is not None
     duplicate = OutlookMessage(
@@ -88,7 +88,7 @@ def test_duplicate_customer_email_is_identified(isolated_db: Path) -> None:
     second = process_outlook_message(duplicate.user_id, duplicate)
 
     assert second.status == "Duplicate"
-    assert len(database.list_customers(config.DEFAULT_USER_ID)) == 2
+    assert len(database.list_customers(config.DEFAULT_USER_ID)) == 1
 
 
 def test_phone_format_is_preserved_and_normalized_for_duplicates(isolated_db: Path) -> None:

@@ -758,6 +758,7 @@ def upgraded_main() -> None:
     try:
         import config as app_config
         from page_context import initialize_database_safely, initialize_outlook_session_state, selected_user
+        from repository import EmailSyncRepository
         from services import graph_auth
         from services import graph_client
         from storage import database
@@ -826,6 +827,18 @@ def upgraded_main() -> None:
             for index, (label, value) in enumerate(labels):
                 with metric_columns[index % 3]:
                     st.metric(label, value)
+            try:
+                sync_stats = EmailSyncRepository().stats()
+                st.subheader("Database Statistics")
+                sync_columns = st.columns(3)
+                with sync_columns[0]:
+                    st.metric("Last Sync Time", sync_stats.get("last_sync_datetime") or "Never")
+                with sync_columns[1]:
+                    st.metric("Total Contacts", sync_stats.get("total_contacts", 0))
+                with sync_columns[2]:
+                    st.metric("Processed Emails", sync_stats.get("processed_emails", 0))
+            except Exception as exc:
+                st.warning(f"Sync status is unavailable: {exc}")
         else:
             st.warning("Dashboard metrics are unavailable until the local database can be initialized.")
     except Exception as exc:

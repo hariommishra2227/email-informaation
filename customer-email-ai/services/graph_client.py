@@ -8,6 +8,7 @@ import hashlib
 import json
 import re
 import time
+from collections.abc import Iterator
 from typing import Any
 
 import requests
@@ -22,6 +23,7 @@ from services.outlook_email_service import get_mock_message, list_mock_messages
 LOGGER = logging.getLogger(__name__)
 GRAPH_BASE_URL = "https://graph.microsoft.com/v1.0"
 REQUEST_TIMEOUT_SECONDS = 20
+MAX_GRAPH_RETRIES = 4
 LAST_GRAPH_REQUEST_DIAGNOSTIC: dict[str, str] = {}
 
 
@@ -91,23 +93,115 @@ def list_inbox_messages(user_id: str, limit: int = 50) -> list[OutlookMessage]:
             sender = (item.get("from") or {}).get("emailAddress", {}) or {}
             body_info = item.get("body") or {}
             body = _body_to_text(str(body_info.get("content", "")), str(body_info.get("contentType", "")))
-            messages.append(
-                OutlookMessage(
-                    message_id=message_id,
-                    user_id=user_id,
-                    sender_name=sender.get("name", ""),
-                    sender_email=sender.get("address", ""),
-                    subject=item.get("subject", ""),
-                    body=body,
-                    body_preview=item.get("bodyPreview", ""),
-                    received_datetime=item.get("receivedDateTime", ""),
-                    is_read=bool(item.get("isRead")),
-                    has_attachments=bool(item.get("hasAttachments")),
-                    attachment_names=[],
-                )
-            )
+            messages.append(_outlook_message_from_graph_item(user_id, item))
         next_url = payload.get("@odata.nextLink")
     return messages
+
+
+def list_mailbox_messages(
+    user_id: str,
+    since_datetime: str | None = None,
+    page_size: int = 50,
+) -> list[OutlookMessage]:
+    """Return every mailbox message, following Microsoft Graph pagination."""
+    page_size = min(100, max(1, int(page_size or 50)))
+    if config.is_mock_mode():
+        messages = list_mock_messages(user_id)
+        if since_datetime:
+            messages = [
+                message for message in messages
+                if _datetime_sort_key(message.received_datetime) > _datetime_sort_key(since_datetime)
+            ]
+        return messages
+
+    token = graph_auth.get_valid_access_token()
+    filter_clause = ""
+    if since_datetime:
+        safe_since = since_datetime.replace("'", "")
+        filter_clause = f"&$filter=receivedDateTime gt {safe_since}"
+    next_url = (
+        f"{GRAPH_BASE_URL}/me/messages"
+        "?$select=id,internetMessageId,subject,from,receivedDateTime,bodyPreview,body,isRead,hasAttachments,webLink"
+        f"&$orderby=receivedDateTime desc&$top={page_size}{filter_clause}"
+    )
+    messages: list[OutlookMessage] = []
+    while next_url:
+        payload, token = _graph_get_with_token(next_url, token)
+        for item in payload.get("value", []):
+            message_id = str(item.get("id") or "").strip()
+            if not message_id:
+                LOGGER.warning("Graph message without id was skipped.")
+                continue
+            messages.append(_outlook_message_from_graph_item(user_id, item))
+        next_url = payload.get("@odata.nextLink")
+    return messages
+
+
+def iter_mailbox_message_pages(
+    user_id: str,
+    *,
+    page_size: int | None = None,
+    delta_link: str = "",
+) -> Iterator[tuple[list[OutlookMessage], str]]:
+    """Yield Microsoft Graph message pages and the latest delta link.
+
+    The delta link is returned for persistence only and must not be logged or
+    displayed because it can contain sensitive mailbox cursor state.
+    """
+    resolved_page_size = min(999, max(1, int(page_size or config.EMAIL_FETCH_BATCH_SIZE)))
+    if config.is_mock_mode():
+        messages = list_mock_messages(user_id)
+        for index in range(0, len(messages), resolved_page_size):
+            yield messages[index:index + resolved_page_size], "mock-delta-link"
+        return
+
+    token = graph_auth.get_valid_access_token()
+    next_url = delta_link or (
+        f"{GRAPH_BASE_URL}/me/mailFolders/inbox/messages/delta"
+        "?$select=id,internetMessageId,subject,from,receivedDateTime,bodyPreview,body,isRead,hasAttachments"
+        f"&$top={resolved_page_size}"
+    )
+    latest_delta_link = delta_link
+    while next_url:
+        payload, token = _graph_get_with_token(next_url, token)
+        messages: list[OutlookMessage] = []
+        for item in payload.get("value", []):
+            if "@removed" in item:
+                continue
+            message_id = str(item.get("id") or "").strip()
+            if not message_id:
+                LOGGER.warning("Graph message without id was skipped.")
+                continue
+            messages.append(_outlook_message_from_graph_item(user_id, item))
+        latest_delta_link = str(payload.get("@odata.deltaLink") or latest_delta_link or "")
+        yield messages, latest_delta_link
+        next_url = payload.get("@odata.nextLink")
+
+
+def _outlook_message_from_graph_item(user_id: str, item: dict[str, Any]) -> OutlookMessage:
+    """Convert one Microsoft Graph message payload into the local model."""
+    sender = (item.get("from") or {}).get("emailAddress", {}) or {}
+    body_info = item.get("body") or {}
+    body = _body_to_text(str(body_info.get("content", "")), str(body_info.get("contentType", "")))
+    return OutlookMessage(
+        message_id=str(item.get("id") or "").strip(),
+        user_id=user_id,
+        sender_name=sender.get("name", ""),
+        sender_email=sender.get("address", ""),
+        subject=item.get("subject", ""),
+        body=body,
+        body_preview=item.get("bodyPreview", ""),
+        received_datetime=item.get("receivedDateTime", ""),
+        is_read=bool(item.get("isRead")),
+        has_attachments=bool(item.get("hasAttachments")),
+        attachment_names=[],
+        internet_message_id=str(item.get("internetMessageId") or ""),
+    )
+
+
+def _datetime_sort_key(value: str) -> str:
+    """Normalize timestamps for stable ISO string comparison."""
+    return str(value or "").replace("Z", "+00:00")
 
 
 def get_message_body(user_id: str, message_id: str) -> str:
@@ -162,11 +256,7 @@ def _graph_get_with_token(url: str, token: str, retry_on_unauthorized: bool = Tr
         raise RuntimeError("Microsoft Graph request was not sent because the access token is empty.")
     if diagnostics["Token Expired"] == "Yes":
         raise RuntimeError("Microsoft Graph request was not sent because the access token is expired.")
-    try:
-        response = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT_SECONDS)
-    except requests.RequestException as exc:
-        LOGGER.exception("Microsoft Graph network request failed for %s.", _safe_graph_url(url))
-        raise RuntimeError("Network failure while contacting Microsoft Graph.") from exc
+    response = _send_graph_get_with_retries(url, headers)
     LOGGER.info("Microsoft Graph response status=%s url=%s", response.status_code, _safe_graph_url(url))
     LOGGER.info("Microsoft Graph response body=%s", _safe_response_text(response))
     graph_error = _graph_error_details(response)
@@ -210,6 +300,52 @@ def _graph_get_with_token(url: str, token: str, retry_on_unauthorized: bool = Tr
         )
         raise GraphApiError(response.status_code, graph_error["code"], graph_error["message"])
     return response.json(), str(token or "")
+
+
+def _send_graph_get_with_retries(url: str, headers: dict[str, str]) -> requests.Response:
+    """Send a GET request with bounded retry/backoff for throttling and transient failures."""
+    delay = 1.0
+    last_exc: requests.RequestException | None = None
+    for attempt in range(1, MAX_GRAPH_RETRIES + 1):
+        try:
+            response = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT_SECONDS)
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            last_exc = exc
+            LOGGER.warning("Microsoft Graph transient network failure attempt=%s url=%s", attempt, _safe_graph_url(url))
+        else:
+            if response.status_code not in {429, 500, 502, 503, 504}:
+                return response
+            retry_after = _retry_after_seconds(response)
+            sleep_for = retry_after if retry_after is not None else delay
+            LOGGER.warning(
+                "Microsoft Graph transient HTTP %s attempt=%s retry_after=%s url=%s",
+                response.status_code,
+                attempt,
+                retry_after,
+                _safe_graph_url(url),
+            )
+            if attempt == MAX_GRAPH_RETRIES:
+                return response
+            time.sleep(min(sleep_for, 30))
+            delay = min(delay * 2, 30)
+            continue
+        if attempt == MAX_GRAPH_RETRIES:
+            LOGGER.exception("Microsoft Graph network request failed for %s.", _safe_graph_url(url))
+            raise RuntimeError("Network failure while contacting Microsoft Graph.") from last_exc
+        time.sleep(min(delay, 30))
+        delay = min(delay * 2, 30)
+    raise RuntimeError("Network failure while contacting Microsoft Graph.")
+
+
+def _retry_after_seconds(response: requests.Response) -> float | None:
+    """Return Retry-After header seconds when Microsoft Graph provides one."""
+    value = str((getattr(response, "headers", {}) or {}).get("Retry-After", "") or "").strip()
+    if not value:
+        return None
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        return None
 
 
 def last_graph_request_diagnostic() -> dict[str, str]:

@@ -4,6 +4,35 @@ Customer Email Extraction AI is a Streamlit app for extracting customer details 
 
 ## Local Setup
 
+Install dependencies and start the Streamlit app:
+
+```bash
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+## PostgreSQL And Migrations
+
+Production storage uses SQLAlchemy with PostgreSQL through `DATABASE_URL`.
+
+```bash
+alembic upgrade head
+alembic current
+alembic downgrade -1
+```
+
+## Docker Compose
+
+```bash
+docker compose up --build
+```
+
+The compose file starts the app and PostgreSQL with local placeholder credentials.
+
+## Production Deployment Overview
+
+Use AWS App Runner or ECS Fargate for the Streamlit web app, RDS PostgreSQL for permanent records, private S3 for attachments, and SQS plus a worker for long mailbox sync jobs. See `DEPLOYMENT.md` and `DEVOPS_HANDOFF.md`.
+
 ```bash
 python -m venv .venv
 .venv\Scripts\activate
