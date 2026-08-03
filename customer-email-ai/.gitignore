@@ -9,6 +9,7 @@ customer_data.db-journal
 customer_data.db-shm
 customer_data.db-wal
 token_cache*
+!services/token_cache_crypto.py
 msal_cache*
 local_attachments/
 exports/

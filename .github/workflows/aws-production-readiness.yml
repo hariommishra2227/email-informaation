@@ -2,9 +2,13 @@ name: AWS Production Readiness
 
 on:
   pull_request:
+    branches:
+      - main
   push:
     branches:
       - agent/fix-aws-production-blockers
+      - agent/fix-aws-ci-validation
+  workflow_dispatch:
 
 jobs:
   validate:
@@ -29,7 +33,7 @@ jobs:
     env:
       APP_ENV: test
       DATABASE_URL: postgresql+psycopg://app_user:app_password@localhost:5432/customer_email_ai
-      TOKEN_CACHE_ENCRYPTION_KEY: ci-token-cache-key
+      TOKEN_CACHE_ENCRYPTION_KEY: Y2ktdG9rZW4tY2FjaGUta2V5MDAwMDAwMDAwMDAwMDA=
       OUTLOOK_MODE: mock
       JOB_BACKEND: local
       STORAGE_BACKEND: local
@@ -47,8 +51,19 @@ jobs:
       - run: python -m alembic -c alembic.ini current
       - run: python -m pytest -q
       - run: python -m pip check
-      - run: docker compose config
-      - run: docker build .
+      - run: docker compose --profile worker config
+      - run: docker build --target web .
+      - run: docker build --target worker .
+
+  secret-scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
       - name: Secret scan
         run: |
-          ! grep -RInE "AKIA[0-9A-Z]{16}|-----BEGIN (RSA |OPENSSH |)PRIVATE KEY-----|client_secret *= *['\"][^'\"]{12,}|refresh_token *= *['\"][^'\"]{12,}" .
+          if git grep -n -E "AKIA[0-9A-Z]{16}|-----BEGIN (RSA |OPENSSH |)PRIVATE KEY-----|client_secret *= *['\"][^'\"]{12,}|refresh_token *= *['\"][^'\"]{12,}"; then
+            echo "Potential credential detected in tracked files."
+            exit 1
+          fi
