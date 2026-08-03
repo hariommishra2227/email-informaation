@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 import logging
 from pathlib import Path
 import re
 import traceback
 from urllib.parse import urlparse
+from uuid import NAMESPACE_URL, uuid5
 
 import pandas as pd
 import streamlit as st
@@ -19,7 +20,7 @@ try:
     from page_context import initialize_outlook_session_state
     from repository import EmailSyncRepository
     from services import graph_auth, graph_client
-    from services.customer_service import get_customers, to_export_rows
+    from services.customer_service import get_customers, to_export_rows, to_business_output, BUSINESS_COLUMNS
     from services.email_processor import process_outlook_message
     from storage import database
     from sync import sync_outlook_mailbox
@@ -67,13 +68,12 @@ def render(user_id: str) -> None:
 
     st.write("")
     try:
-        limit, search_text, read_filter, date_range = _render_filters()
+        folder, date_filter, date_range, limit, search_text, skip_internal, received_after, received_before = _render_filters()
     except Exception as exc:
         LOGGER.exception("Outlook filters failed to render.")
         st.error(_safe_render_exception_message(exc, "Outlook filters"))
         return
 
-    st.write("")
     try:
         refresh_clicked, import_selected_clicked, import_unread_clicked, sync_clicked = _render_quick_actions(user_id)
     except Exception as exc:
@@ -342,24 +342,104 @@ def _ensure_refresh_session_defaults() -> None:
     st.session_state.setdefault("outlook_home_account_id", None)
 
 
-def _render_filters() -> tuple[int, str, str, tuple[date, date] | list]:
-    """Render simple visible filters and advanced options."""
-    st.subheader("Simple Filters")
-    filter_cols = st.columns([0.68, 0.32])
-    with filter_cols[0]:
-        search_text = st.text_input("Search sender or subject", "")
-    with filter_cols[1]:
-        read_filter = st.selectbox("Email status", ["All", "Unread", "Read"])
-    with st.expander("Advanced Filters"):
-        advanced_cols = st.columns([0.5, 0.5])
-        with advanced_cols[0]:
-            date_range = st.date_input("Date range", value=[])
-        with advanced_cols[1]:
-            limit = st.number_input("Maximum emails", min_value=1, max_value=500, value=50, step=25)
-    return int(limit), search_text, read_filter, date_range
+def _render_enterprise_sync(user_id: str, received_after: str | None, received_before: str | None, limit: int = 100, folder: str = "Inbox") -> None:
+    """Render persistent mailbox sync status without changing existing inbox actions."""
+    st.subheader("Sync Status")
+    statistics = database_statistics()
+    status_columns = st.columns(3)
+    with status_columns[0]:
+        st.metric("Last Sync Time", statistics.get("last_sync_datetime") or "Never")
+    with status_columns[1]:
+        st.metric("Total Contacts", statistics.get("total_contacts", 0))
+    with status_columns[2]:
+        st.metric("Processed Emails", statistics.get("processed_emails", 0))
+
+    select_all = st.checkbox("Select All Emails", key="select_all_outlook_emails")
+    if not st.button("Extract Customer Data", use_container_width=True):
+        _render_sync_result()
+        return
+    if not select_all:
+        st.warning("Enable Select All Emails before extraction.")
+        return
+
+    progress_bar = st.progress(0)
+
+    job_id = str(uuid5(NAMESPACE_URL, f"outlook:{user_id}:{received_after or ''}:{received_before or ''}"))
+    job = LargeMailboxSynchronizer(user_id, limit, job_id=job_id, batch_size=100, received_after=received_after, received_before=received_before)
+    st.session_state["large_mailbox_job_id"] = job.job_id
+    result = job.run(progress=lambda current: progress_bar.progress(min(0.99, current.fetched / max(1000, current.fetched))))
+    progress_bar.progress(1.0)
+    st.session_state["enterprise_sync_summary"] = {
+        "processed_emails": result.processed,
+        "skipped_emails": result.skipped,
+        "new_contacts": 0,
+        "updated_contacts": 0,
+        "duplicates_removed": 0,
+        "total_processing_time": 0,
+        "fetched": result.fetched,
+        "failed": result.failed,
+        "remaining": max(0, result.remaining - result.fetched) if result.remaining else 0,
+        "more_remaining": result.status == "Paused",
+    }
+    _render_sync_result()
+    if result.status == "Paused":
+        st.info("More matching emails remain. Run extraction again to continue.")
 
 
-def _filter_messages(messages: list, search_text: str, read_filter: str, date_range: tuple[date, date] | list) -> list:
+def _render_sync_result() -> None:
+    """Display the required synchronization performance counters."""
+    summary = st.session_state.get("enterprise_sync_summary")
+    if not summary:
+        return
+    columns = st.columns(6)
+    labels = (
+        ("Processed Emails", "processed_emails"),
+        ("Skipped Emails", "skipped_emails"),
+        ("New Contacts", "new_contacts"),
+        ("Updated Contacts", "updated_contacts"),
+        ("Duplicates Removed", "duplicates_removed"),
+        ("Total Processing Time", "total_processing_time"),
+    )
+    for column, (label, key) in zip(columns, labels):
+        value = summary.get(key, 0)
+        if key == "total_processing_time":
+            value = f"{float(value):.2f}s"
+        with column:
+            st.metric(label, value)
+
+
+def _render_filters() -> tuple[str, str, tuple[date, date] | list, int, str, bool, str | None, str | None]:
+    """Render the email folder, date, volume, and filtering controls."""
+    st.subheader("Email Filters")
+    controls = st.columns(4)
+    with controls[0]:
+        folder = st.selectbox("Email Folder", ["Inbox", "Sent Items", "Archive", "Drafts"])
+    with controls[1]:
+        date_filter = st.selectbox("Date Filter", ["All Emails", "Last 7 Days", "Last 30 Days", "Last 90 Days", "Custom Date Range"])
+    with controls[2]:
+        limit = int(st.number_input("Maximum Emails", min_value=10, max_value=5000, value=100, step=10))
+    with controls[3]:
+        skip_internal = st.checkbox("Skip Internal Emails", value=True)
+    search_text = st.text_input("Search sender or subject", "")
+    date_range: tuple[date, date] | list = []
+    received_after = None
+    received_before = None
+    if date_filter == "Custom Date Range":
+        custom_dates = st.date_input("Email date range", value=())
+        if isinstance(custom_dates, tuple) and len(custom_dates) == 2:
+            start_date, end_date = custom_dates
+            if start_date <= end_date:
+                received_after = datetime.combine(start_date, datetime.min.time(), tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+                received_before = datetime.combine(end_date + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+    elif date_filter in {"Last 7 Days", "Last 30 Days", "Last 90 Days"}:
+        days = int(date_filter.split()[1])
+        start_date = date.today() - timedelta(days=days - 1)
+        received_after = datetime.combine(start_date, datetime.min.time(), tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+        received_before = datetime.combine(date.today() + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+    return folder, date_filter, date_range, limit, search_text, skip_internal, received_after, received_before
+
+
+def _filter_messages(messages: list, search_text: str, date_filter: str, date_range: tuple[date, date] | list) -> list:
     """Filter Outlook messages by business-facing controls."""
     filtered = messages
     if search_text.strip():
@@ -370,9 +450,6 @@ def _filter_messages(messages: list, search_text: str, read_filter: str, date_ra
             or needle in message.sender_email.lower()
             or needle in message.subject.lower()
         ]
-    if read_filter != "All":
-        want_read = read_filter == "Read"
-        filtered = [message for message in filtered if message.is_read is want_read]
     if isinstance(date_range, tuple) and len(date_range) == 2:
         start_date, end_date = date_range
         filtered = [
@@ -391,6 +468,19 @@ def _render_inbox_list(messages: list, status_rows: dict[str, str]) -> list[str]
         st.session_state["outlook_selected_messages"] = []
         return []
 
+    action_cols = st.columns(2)
+    with action_cols[0]:
+        select_all_clicked = st.button("Select All Loaded Emails", key="select_all_loaded_outlook", use_container_width=True)
+    with action_cols[1]:
+        clear_clicked = st.button("Clear Selection", key="clear_outlook_selection", use_container_width=True)
+    if select_all_clicked:
+        selected_message_ids = select_all_loaded_message_ids(messages)
+        st.success(f"{len(selected_message_ids)} visible emails selected.")
+    elif clear_clicked:
+        selected_message_ids = clear_selected_message_ids()
+        st.success("Selection cleared.")
+    else:
+        selected_message_ids = _selected_message_ids()
     selected_message_ids = st.session_state.get("selected_outlook_messages", [])
     table_rows = [
         {
@@ -411,16 +501,52 @@ def _render_inbox_list(messages: list, status_rows: dict[str, str]) -> list[str]
         pd.DataFrame(table_rows),
         hide_index=True,
         use_container_width=True,
+        key="outlook_message_selection_table",
         disabled=disabled_columns,
         column_config={
             "Select": st.column_config.CheckboxColumn("Select"),
             "Message ID": st.column_config.TextColumn("Message ID", disabled=True),
         },
     )
-    selected_ids = edited.loc[edited["Select"], "Message ID"].tolist() if not edited.empty else []
+    selected_ids = unique_message_ids(edited.loc[edited["Select"], "Message ID"].tolist() if not edited.empty else [])
     st.session_state["selected_outlook_messages"] = selected_ids
     st.session_state["outlook_selected_messages"] = selected_ids
     st.caption(f"{len(messages)} fetched. {len(selected_ids)} selected. Status is refreshed after extraction.")
+    return selected_ids
+
+
+def unique_message_ids(message_ids: list[str]) -> list[str]:
+    """Return non-empty message IDs once, preserving their loaded-list order."""
+    return list(dict.fromkeys(str(message_id) for message_id in message_ids if str(message_id)))
+
+
+def select_all_loaded_message_ids(messages: list) -> list[str]:
+    """Select only the currently loaded/visible messages, regardless of read state."""
+    selected_ids = unique_message_ids([message.message_id for message in messages])
+    st.session_state["selected_outlook_messages"] = selected_ids
+    st.session_state["outlook_selected_messages"] = selected_ids
+    return selected_ids
+
+
+def clear_selected_message_ids() -> list[str]:
+    """Clear the central selection state without fetching or extracting messages."""
+    st.session_state["selected_outlook_messages"] = []
+    st.session_state["outlook_selected_messages"] = []
+    return []
+
+
+def _update_selected_outlook_messages(messages: list, select_all: bool) -> list[str]:
+    """Update selection state using only the messages currently loaded in the UI."""
+    current_ids = [message.message_id for message in messages]
+    selected_ids = list(st.session_state.get("selected_outlook_messages", []))
+    previous_select_all = bool(st.session_state.get("previous_select_all_outlook_messages", False))
+    if select_all:
+        selected_ids = list(dict.fromkeys(selected_ids + current_ids))
+    elif previous_select_all:
+        selected_ids = []
+    st.session_state["previous_select_all_outlook_messages"] = select_all
+    st.session_state["selected_outlook_messages"] = selected_ids
+    st.session_state["outlook_selected_messages"] = selected_ids
     return selected_ids
 
 
@@ -444,6 +570,7 @@ def _import_messages(user_id: str, messages: list, message_ids: list[str]) -> No
     st.subheader("Extract Customer Information")
     by_id = {message.message_id: message for message in messages}
     summary = {
+        "selected_emails": len(message_ids),
         "emails_processed": 0,
         "customers_extracted": 0,
         "duplicates_skipped": 0,
@@ -456,35 +583,36 @@ def _import_messages(user_id: str, messages: list, message_ids: list[str]) -> No
         st.warning("Select at least one email to import.")
         return
     progress = st.progress(0)
-    for index, message_id in enumerate(message_ids, start=1):
-        summary["emails_processed"] += 1
-        if message_id in imported_ids:
-            summary["duplicates_skipped"] += 1
-            continue
-        message = by_id.get(message_id)
-        if not message:
-            summary["failed_records"] += 1
-            continue
-        try:
-            result = process_outlook_message(user_id, message)
-            if result.status == "Already Processed":
+    for batch_start in range(0, len(message_ids), 50):
+        for index, message_id in enumerate(message_ids[batch_start:batch_start + 50], start=batch_start + 1):
+            summary["emails_processed"] += 1
+            progress.progress(index / len(message_ids))
+            if message_id in imported_ids:
                 summary["duplicates_skipped"] += 1
-            elif result.status == "Duplicate":
-                summary["duplicates_skipped"] += 1
-                imported_ids.add(message_id)
-            elif result.status == "Incomplete":
-                summary["incomplete_records"] += 1
-                summary["customers_extracted"] += 1
-                imported_ids.add(message_id)
-            elif result.status == "Failed":
+                continue
+            message = by_id.get(message_id)
+            if not message:
                 summary["failed_records"] += 1
-            else:
-                summary["customers_extracted"] += 1
-                imported_ids.add(message_id)
-        except Exception:
-            LOGGER.exception("Outlook message import failed.")
-            summary["failed_records"] += 1
-        progress.progress(index / len(message_ids))
+                continue
+            try:
+                result = process_outlook_message(user_id, message)
+                if result.status == "Already Processed":
+                    summary["duplicates_skipped"] += 1
+                elif result.status == "Duplicate":
+                    summary["duplicates_skipped"] += 1
+                    imported_ids.add(message_id)
+                elif result.status == "Incomplete":
+                    summary["incomplete_records"] += 1
+                    summary["customers_extracted"] += 1
+                    imported_ids.add(message_id)
+                elif result.status == "Failed":
+                    summary["failed_records"] += 1
+                else:
+                    summary["customers_extracted"] += 1
+                    imported_ids.add(message_id)
+            except Exception:
+                LOGGER.exception("Outlook message import failed.")
+                summary["failed_records"] += 1
     st.session_state["imported_outlook_message_ids"] = sorted(imported_ids)
     st.session_state["outlook_import_summary"] = summary
 
@@ -550,8 +678,9 @@ def _render_import_result() -> None:
     if not summary:
         return
     st.subheader("Extraction Summary")
-    result_cols = st.columns(5)
+    result_cols = st.columns(6)
     labels = [
+        ("Emails selected", "selected_emails"),
         ("Emails processed", "emails_processed"),
         ("Customers extracted", "customers_extracted"),
         ("Duplicates skipped", "duplicates_skipped"),
@@ -574,18 +703,7 @@ def _render_customer_preview(user_id: str) -> None:
     if not rows:
         st.info("Extracted Outlook customer records will appear here after import.")
         return
-    preview = pd.DataFrame(rows)
-    column_map = {
-        "contact_name": "Contact Name",
-        "organisation": "Organisation",
-        "email": "Email",
-        "mobile": "Mobile",
-        "designation": "Designation",
-        "subject": "Subject",
-        "source": "Source",
-        "status": "Status",
-    }
-    preview = preview[[column for column in column_map if column in preview.columns]].rename(columns=column_map)
+    preview = pd.DataFrame([to_business_output(row) for row in rows], columns=BUSINESS_COLUMNS)
     st.dataframe(preview, hide_index=True, use_container_width=True)
     st.download_button(
         "Download Excel Report",

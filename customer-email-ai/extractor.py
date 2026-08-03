@@ -11,6 +11,8 @@ import re
 from html import unescape
 from typing import Any
 
+import config
+
 try:
     import phonenumbers
 except ImportError:  # pragma: no cover
@@ -30,6 +32,13 @@ LOGGER = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
 
 EMAIL_PATTERN = re.compile(r"(?P<email>[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})")
+INTERNAL_DOMAIN = "itsipl.com"
+BOILERPLATE_PHRASES = (
+    "privacy statement", "unsubscribe", "view online", "click here",
+    "warning: this message", "caution! this message",
+    "this message was sent from outside your organization", "external email",
+    "manage preferences", "copyright",
+)
 PHONE_PATTERN = re.compile(
     r"(?<![A-Za-z0-9])"
     r"(?:\+?\d{1,3}[\s.-]?)?"
@@ -37,7 +46,7 @@ PHONE_PATTERN = re.compile(
     r"\d{2,5}"
     r"(?![A-Za-z0-9])"
 )
-PERSON_NAME_PATTERN = re.compile(r"^[A-Z][A-Za-z'\-.]+(?:\s+[A-Z][A-Za-z'\-.]+)+$")
+PERSON_NAME_PATTERN = re.compile(r"^[A-Z][A-Za-z'\-.]*(?:\s+[A-Z][A-Za-z'\-.]+)+$")
 COMPANY_HINT_PATTERN = re.compile(
     r"\b(?:company|companies|organization|organisation|solutions|technologies|systems|software|services|industries|ventures|logistics|telecom|retail|group|ltd|limited|pvt|private|inc|llc|corp|corporation)\b",
     re.IGNORECASE,
@@ -88,6 +97,8 @@ NON_PHONE_KEYWORDS = (
     "quote",
 )
 ADDRESS_KEYWORDS = (
+    "sector", "phase", "industrial area", "nagar", "colony", "building",
+    "floor", "block", "plot", "district", "state", "india",
     "street",
     "road",
     "avenue",
@@ -124,6 +135,47 @@ DESIGNATION_KEYWORDS: dict[str, str] = {
     "cto": "CTO",
     "cio": "CIO",
 }
+GENERIC_MAILBOXES = {
+    "info", "sales", "support", "contact", "admin", "office", "help",
+    "enquiry", "marketing", "hr", "accounts", "noreply", "no-reply",
+}
+QUOTE_MARKERS = ("---------- forwarded message", "begin forwarded message", "original message", "-----original message-----")
+SIGNATURE_MARKERS = re.compile(r"(?im)^\s*(?:thanks\s*&\s*regards|thanks and regards|best regards|warm regards|kind regards|regards|sincerely|धन्यवाद)\s*,?\s*$")
+NAME_REJECT_WORDS = ("payment", "account", "quotation", "alert", "detected", "reminder", "invoice", "order", "part number", "purchase order", "support", "notification", "warning", "caution")
+ORG_REJECT_PHRASES = ("warning", "caution", "message was sent", "outside your organization", "please find", "go ahead", "thanks and regards", "reminder", "attached", "review", "subject", "reply")
+FREE_EMAIL_DOMAINS = {"gmail.com", "yahoo.com", "outlook.com", "hotmail.com"}
+
+
+def _valid_email(value: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", str(value or "").strip()))
+
+
+def _automated_email(value: str) -> bool:
+    local = str(value or "").split("@", 1)[0].lower()
+    return local in {"no-reply", "noreply", "donotreply", "mailer-daemon"} or local.startswith(("no-reply", "noreply", "donotreply"))
+
+
+def select_customer_email(
+    graph_sender_email: str = "",
+    forwarded_sender_email: str = "",
+    signature_email: str = "",
+    body_emails: list[str] | None = None,
+) -> dict[str, Any]:
+    """Select one external customer email while preserving source priority."""
+    candidates = (
+        (graph_sender_email, "graph_sender", 1.0),
+        (forwarded_sender_email, "forwarded_sender", 0.95),
+        (signature_email, "signature", 0.90),
+    )
+    for value, source, confidence in candidates:
+        value = str(value or "").strip()
+        if _valid_email(value) and not config.is_internal_email(value) and not _automated_email(value):
+            return {"email": value, "email_source": source, "email_confidence": confidence}
+    for value in dict.fromkeys(body_emails or []):
+        value = str(value).strip()
+        if _valid_email(value) and not config.is_internal_email(value) and not _automated_email(value):
+            return {"email": value, "email_source": "body", "email_confidence": 0.40}
+    return {"email": "", "email_source": "", "email_confidence": 0.0}
 
 
 class EmailExtractionEngine:
@@ -168,6 +220,37 @@ class EmailExtractionEngine:
             LOGGER.exception("HTML cleanup failed: %s", exc)
             return unescape(text)
 
+    def clean_email_content(self, text: str) -> str:
+        """Remove transport noise and quoted history while retaining the latest signature."""
+        text = self.clean_html(text).replace("\r\n", "\n").replace("\r", "\n")
+        lines = []
+        for line in text.splitlines():
+            lowered = line.strip().lower()
+            if any(p in lowered for p in ("this message was sent from outside your organization", "external email", "caution!", "warning!", "confidentiality notice", "confidentiality disclaimer", "antivirus")):
+                continue
+            if any(marker in lowered for marker in QUOTE_MARKERS) or re.match(r"^>+", line.strip()):
+                break
+            if re.match(r"^(from|sent|to|cc):\s", lowered) and lines:
+                break
+            lines.append(line)
+        return "\n".join(self._clean_text(line) if self._clean_text(line) else "" for line in lines).strip()
+
+    def extract_signature(self, text: str) -> str:
+        """Return only the latest signature block, if a sign-off is present."""
+        cleaned = self.clean_email_content(text)
+        matches = list(SIGNATURE_MARKERS.finditer(cleaned))
+        if not matches:
+            return ""
+        return cleaned[matches[-1].start():].strip()
+
+    def _valid_name(self, value: str) -> bool:
+        value = re.sub(r"^(dear|hi|hello)\s+", "", value.strip(), flags=re.I).strip(" ,:")
+        return bool(value and len(value.split()) <= 4 and not any(w in value.lower() for w in NAME_REJECT_WORDS) and self._looks_like_person_name(value))
+
+    def _valid_organisation(self, value: str) -> bool:
+        value = self._clean_text(value).strip(" ,:;-|")
+        return bool(value and len(value.split()) <= 8 and not any(p in value.lower() for p in ORG_REJECT_PHRASES) and not re.search(r"[!?]", value) and not self._looks_like_person_name(value))
+
     def _clean_text(self, text: str) -> str:
         """Normalize repeated whitespace into a single space."""
         return re.sub(r"\s+", " ", text).strip()
@@ -175,6 +258,95 @@ class EmailExtractionEngine:
     def _iter_lines(self, text: str) -> list[str]:
         """Return cleaned, non-empty lines from a text blob."""
         return [self._clean_text(line) for line in text.splitlines() if self._clean_text(line)]
+
+    def _current_text(self, text: str) -> str:
+        """Return readable current-message text, stopping at quoted history."""
+        cleaned = self.clean_html(text).replace("\r\n", "\n")
+        lines = cleaned.splitlines()
+        current: list[str] = []
+        for line in lines:
+            lowered = line.strip().lower()
+            if any(marker in lowered for marker in QUOTE_MARKERS) or re.match(r"^>+", line.strip()):
+                break
+            if re.match(r"^(from|sent|to|cc|subject):\s", lowered) and current and lowered.startswith("from:"):
+                break
+            current.append(line)
+        return "\n".join(current)
+
+    def _split_blocks(self, text: str) -> list[str]:
+        """Split current content without allowing fields to cross blank lines."""
+        blocks: list[list[str]] = []
+        block: list[str] = []
+        for raw in text.splitlines():
+            line = self._clean_text(raw)
+            if not line:
+                if block:
+                    blocks.append(block); block = []
+                continue
+            block.append(line)
+            if re.search(r"(?:best|kind|warm) regards|sincerely|thank you", line, re.I):
+                # The marker belongs to the following signature lines; retain it in this block.
+                continue
+        if block:
+            blocks.append(block)
+        merged: list[str] = []
+        for block in blocks:
+            if merged and not self.extract_email_addresses(merged[-1]) and (
+                self.extract_designation(merged[-1]) or self._looks_like_company(merged[-1])
+            ) and self.extract_email_addresses("\n".join(block)):
+                merged[-1] += "\n" + "\n".join(block)
+            else:
+                merged.append("\n".join(block))
+        return merged
+
+    def _name_email_similarity(self, name: str, email: str) -> float:
+        local = email.split("@", 1)[0].lower()
+        tokens = [part for part in re.split(r"[^a-z]+", local) if part]
+        name_tokens = [part.lower() for part in re.findall(r"[A-Za-z]+", name)]
+        if not tokens or not name_tokens:
+            return 0.0
+        if local in {"".join(name_tokens), ".".join(name_tokens), "_".join(name_tokens)}:
+            return 1.0
+        matches = sum(token == candidate or token.startswith(candidate[:1]) for token in tokens for candidate in name_tokens)
+        return min(1.0, matches / max(len(name_tokens), 2))
+
+    def _pair_block(self, block: str) -> dict[str, Any] | None:
+        lines = self._iter_lines(block)
+        emails = self.extract_email_addresses(block)
+        if not emails:
+            return None
+        email = emails[0]
+        generic = email.split("@", 1)[0].lower() in GENERIC_MAILBOXES
+        names = [(i, line) for i, line in enumerate(lines) if self._looks_like_person_name(line) and not self.extract_designation(line)]
+        for i, line in enumerate(lines):
+            match = re.search(r"(?:contact|name|regards|thanks)\s*:\s*([A-Z][A-Za-z'\-.]+(?:\s+[A-Z][A-Za-z'\-.]+)+)", line, re.I)
+            if match and self._looks_like_person_name(match.group(1)):
+                names.append((i, match.group(1)))
+        email_line = next((i for i, line in enumerate(lines) if EMAIL_PATTERN.search(line)), 0)
+        ranked = []
+        for index, name in names:
+            distance = abs(email_line - index)
+            similarity = self._name_email_similarity(name, email)
+            score = 0.25 + max(0.0, 0.25 - min(distance, 5) * 0.04) + similarity * 0.35
+            if generic:
+                score = 0.45 + max(0.0, 0.25 - min(distance, 5) * 0.04)
+            ranked.append((score, -distance, name))
+        name = ""
+        score = 0.35 if generic else 0.30
+        if ranked:
+            best = max(ranked)
+            if (generic and best[0] >= 0.55) or (not generic and best[0] >= 0.55):
+                score, _, name = best
+        return {"block": block, "email": email, "name": name, "confidence": round(min(score, 1.0), 2)}
+
+    def extract_contacts(self, email_text: str) -> list[dict[str, Any]]:
+        """Extract independently paired contact candidates from local blocks."""
+        current = self._current_text(email_text)
+        return [candidate for block in self._split_blocks(current) if (candidate := self._pair_block(block))]
+
+    def _is_boilerplate(self, line: str) -> bool:
+        lowered = line.lower()
+        return any(phrase in lowered for phrase in BOILERPLATE_PHRASES)
 
     def _looks_like_company(self, candidate: str) -> bool:
         """Return whether a candidate line looks like a company or organisation."""
@@ -191,7 +363,10 @@ class EmailExtractionEngine:
             return []
 
         try:
-            return list(dict.fromkeys(EMAIL_PATTERN.findall(text)))
+            return list(dict.fromkeys(
+                email for email in EMAIL_PATTERN.findall(text)
+                if not email.lower().endswith("@" + INTERNAL_DOMAIN)
+            ))
         except Exception as exc:
             LOGGER.exception("Email extraction failed: %s", exc)
             return []
@@ -284,15 +459,19 @@ class EmailExtractionEngine:
             return []
 
         try:
-            lines = self._iter_lines(text)
+            lines = [line for line in self._iter_lines(text) if not self._is_boilerplate(line)]
             phones = self._collect_phone_candidates(lines, prefer_labelled=True)
             if not phones:
                 phones = self._collect_phone_candidates(lines, prefer_labelled=False)
 
             display_numbers: list[str] = []
             for candidate in phones:
+                context = next((line for line in lines if candidate in line), "").lower()
+                if any(word in context for word in ("po", "invoice", "ticket", "order", "case", "reference", "serial", "otp", "toll-free", "toll free")):
+                    continue
                 normalized = self._normalize_phone_number(candidate)
-                if normalized:
+                digits = re.sub(r"\D", "", candidate)
+                if normalized and (not digits.startswith("91") and not (len(digits) == 10 and digits[:1] not in "6789") or digits[-10:][:1] in "6789"):
                     display_numbers.append(self._format_phone_number_for_display(candidate))
 
             return list(dict.fromkeys(display_numbers))
@@ -307,6 +486,8 @@ class EmailExtractionEngine:
         if len(candidate.split()) < 2:
             return False
         lowered = candidate.lower()
+        if lowered in DESIGNATION_KEYWORDS or lowered in set(DESIGNATION_KEYWORDS.values()):
+            return False
         if self._looks_like_company(candidate):
             return False
         if any(keyword in lowered for keyword in ("@", "http", "mobile", "phone", "tel", "contact", "address", "location", "subject", "customer", "sample", "email")):
@@ -458,17 +639,20 @@ class EmailExtractionEngine:
             return ""
 
         try:
-            for line in self._iter_lines(text):
+            lines = [line for line in self._iter_lines(text) if not self._is_boilerplate(line)]
+            for line in lines:
                 lowered_line = line.lower()
-                if lowered_line.startswith("address:"):
-                    return line.split(":", 1)[1].strip()
-                if lowered_line.startswith("location:"):
-                    return line.split(":", 1)[1].strip()
-                if lowered_line.startswith("office:"):
-                    return line.split(":", 1)[1].strip()
+                if self._is_boilerplate(line) or lowered_line.startswith(("address:", "location:", "office:")):
+                    continue
+                if "itsipl" in lowered_line or "i. t. solutions india" in lowered_line:
+                    continue
+                candidate = line.split(":", 1)[1].strip() if ":" in line else line
+                if lowered_line.startswith(("address:", "location:", "office:")):
+                    if self._valid_postal_address(candidate):
+                        return candidate
 
             address_candidates: list[str] = []
-            for line in self._iter_lines(text):
+            for line in lines:
                 lowered_line = line.lower()
                 if any(keyword in lowered_line for keyword in ("address", "location", "office", "city", "state", "country")):
                     if not any(keyword in lowered_line for keyword in ("phone", "mobile", "tel", "telephone", "contact", "email")):
@@ -483,12 +667,31 @@ class EmailExtractionEngine:
                 if re.search(r"\b(?:sector|street|road|avenue|lane|drive|way|boulevard|court|place|park|colony|area)\b", lowered_line) and re.search(r"\d", line):
                     address_candidates.append(line)
 
-            if address_candidates:
-                return self._clean_text(address_candidates[0])
+            for candidate in address_candidates:
+                address_value = candidate.split(":", 1)[1].strip() if ":" in candidate else candidate
+                if self._valid_postal_address(address_value):
+                    return self._clean_text(address_value)
             return ""
         except Exception as exc:
             LOGGER.exception("Address extraction failed: %s", exc)
             return ""
+
+    def _valid_postal_address(self, value: str) -> bool:
+        """Accept only address-like text, never labels or disclaimer sentences."""
+        if not value or self._is_boilerplate(value):
+            return False
+        lowered = value.lower()
+        if "itsipl" in lowered or "i. t. solutions india" in lowered:
+            return False
+        if lowered.strip() in {"location", "privacy statement"}:
+            return False
+        indicators = sum(bool(re.search(rf"\b{re.escape(keyword)}\b", lowered)) for keyword in ADDRESS_KEYWORDS)
+        comma_parts = len([part for part in value.split(",") if part.strip()])
+        has_pin_or_number = bool(re.search(r"\b\d{6}\b", value) or re.search(r"\d", value))
+        # A street/sector/etc. token plus separate locality components (for
+        # example ``Sector 62, Noida, Uttar Pradesh``) is the common compact
+        # address form used in signatures.
+        return indicators >= 1 and has_pin_or_number and comma_parts >= 2
 
     def extract_designation(self, text: str) -> str:
         """Use keyword rules to detect a common business designation."""
@@ -496,7 +699,15 @@ class EmailExtractionEngine:
             return ""
 
         try:
-            lower_text = text.lower()
+            signature = self.extract_signature(text)
+            if signature:
+                lower_text = signature.lower()
+            elif EMAIL_PATTERN.search(text) and any(self._looks_like_person_name(line) for line in self._iter_lines(text)):
+                # Treat a tightly paired name/email contact block as a signature-like
+                # block for backwards compatibility with structured imports.
+                lower_text = text.lower()
+            else:
+                return ""
             for keyword, designation in sorted(DESIGNATION_KEYWORDS.items(), key=lambda item: len(item[0]), reverse=True):
                 if keyword in lower_text:
                     return designation
@@ -505,24 +716,46 @@ class EmailExtractionEngine:
             LOGGER.exception("Designation extraction failed: %s", exc)
             return ""
 
-    def extract(self, email_text: str) -> dict[str, str]:
+    def extract(self, email_text: str, *, graph_sender_email: str = "", graph_sender_name: str = "") -> dict[str, Any]:
         """Run the full extraction pipeline and return the requested JSON schema."""
         try:
-            cleaned_text = self.clean_html(email_text)
-            email_list = self.extract_email_addresses(cleaned_text)
-            mobile_numbers = self.extract_mobile_numbers(cleaned_text)
-            contact_name = self.extract_contact_person_name(cleaned_text)
-            organisation_name = self.extract_organisation_name(cleaned_text)
-            address = self.extract_address(cleaned_text)
-            designation = self.extract_designation(cleaned_text)
+            cleaned_text = self.clean_email_content(email_text)
+            signature = self.extract_signature(cleaned_text)
+            contacts = self.extract_contacts(cleaned_text)
+            email_list = [contact["email"] for contact in reversed(contacts)]
+            selected_email = select_customer_email(graph_sender_email=graph_sender_email, body_emails=email_list)
+            selected_contact = next((contact for contact in contacts if contact["email"].lower() == selected_email["email"].lower()), {})
+            block_text = selected_contact.get("block", "")
+            analysis_text = signature or block_text or cleaned_text
+            mobile_text = signature if self.extract_mobile_numbers(signature) else (block_text or cleaned_text)
+            mobile_numbers = self.extract_mobile_numbers(mobile_text)
+            contact_name = selected_contact.get("name", "")
+            if graph_sender_name.strip() and graph_sender_email and graph_sender_email.lower() == selected_email["email"].lower():
+                if not contact_name or self._name_email_similarity(graph_sender_name, selected_email["email"]) >= 0.5:
+                    contact_name = graph_sender_name.strip()
+            if not self._valid_name(contact_name):
+                contact_name = ""
+            organisation_name = self.extract_organisation_name(signature or cleaned_text)
+            if not self._valid_organisation(organisation_name):
+                domain = graph_sender_email.split("@", 1)[1].lower() if "@" in graph_sender_email else ""
+                organisation_name = "" if domain in FREE_EMAIL_DOMAINS else (domain.split(".")[0].replace("-", " ").title() if domain else "")
+                org_source = "domain" if organisation_name else ""
+            else:
+                org_source = "signature" if signature else "body"
+            address = self.extract_address(analysis_text)
+            designation = self.extract_designation(analysis_text)
             subject = self.extract_subject(cleaned_text)
 
             result: dict[str, str] = {
                 "contact_person_name": contact_name,
                 "customer_name": contact_name,
                 "name": contact_name,
-                "email_id": email_list[0] if email_list else "",
-                "email": email_list[0] if email_list else "",
+                "email_id": selected_email["email"],
+                "email": selected_email["email"],
+                "email_source": selected_email["email_source"],
+                "email_confidence": selected_email["email_confidence"],
+                "pairing_confidence": selected_contact.get("confidence", 0.0),
+                "contacts": contacts,
                 "organisation_name": organisation_name,
                 "company": organisation_name,
                 "mobile_number": mobile_numbers[0] if mobile_numbers else "",
@@ -531,6 +764,16 @@ class EmailExtractionEngine:
                 "address": address,
                 "designation": designation,
                 "subject": subject,
+                "name_source": "graph_sender" if graph_sender_name.strip() else ("body" if contact_name else ""),
+                "name_confidence": 0.95 if graph_sender_name.strip() else (0.45 if contact_name else 0.0),
+                "organisation_source": org_source,
+                "organisation_confidence": 0.90 if signature and organisation_name else (0.55 if organisation_name else 0.0),
+                "mobile_source": "signature" if mobile_numbers and signature else ("body" if mobile_numbers else ""),
+                "mobile_confidence": 0.90 if mobile_numbers and signature else (0.45 if mobile_numbers else 0.0),
+                "designation_source": "signature" if designation and signature else ("body" if designation else ""),
+                "designation_confidence": 0.90 if designation and signature else (0.0 if not designation else 0.35),
+                "cleaned_preview": cleaned_text[:500] if getattr(config, "DEBUG", False) else "",
+                "signature_preview": signature[:500] if getattr(config, "DEBUG", False) else "",
             }
             LOGGER.info("Extraction complete for %d characters of email content.", len(cleaned_text))
             return result
@@ -542,6 +785,8 @@ class EmailExtractionEngine:
                 "name": "",
                 "email_id": "",
                 "email": "",
+                "email_source": "",
+                "email_confidence": 0.0,
                 "organisation_name": "",
                 "company": "",
                 "mobile_number": "",
@@ -550,6 +795,8 @@ class EmailExtractionEngine:
                 "address": "",
                 "designation": "",
                 "subject": "",
+                "name_source": "",
+                "name_confidence": 0.0,
             }
 
 

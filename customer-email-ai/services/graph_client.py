@@ -10,6 +10,7 @@ import re
 import time
 from collections.abc import Iterator
 from typing import Any
+from urllib.parse import quote
 
 import requests
 
@@ -67,19 +68,36 @@ def get_current_user(user_id: str | None = None) -> dict[str, Any]:
     return _graph_get(f"{GRAPH_BASE_URL}/me", token)
 
 
-def list_inbox_messages(user_id: str, limit: int = 50) -> list[OutlookMessage]:
+def list_inbox_messages(
+    user_id: str,
+    limit: int = 50,
+    received_after: str | None = None,
+    received_before: str | None = None,
+    folder: str = "Inbox",
+) -> list[OutlookMessage]:
     """Return Outlook inbox messages without marking them read."""
     limit = max(1, int(limit or 50))
     if config.is_mock_mode():
-        return list_mock_messages(user_id, limit=limit)
+        messages = list_mock_messages(user_id, limit=limit)
+        if received_after:
+            messages = [message for message in messages if message.received_datetime >= received_after]
+        if received_before:
+            messages = [message for message in messages if message.received_datetime < received_before]
+        return messages
 
     token = graph_auth.get_valid_access_token()
     LOGGER.info("Calling Microsoft Graph inbox endpoint with limit=%s.", limit)
+    folder_id = {"Inbox": "inbox", "Sent Items": "sentitems", "Archive": "archive", "Drafts": "drafts"}.get(folder, "inbox")
     next_url = (
-        f"{GRAPH_BASE_URL}/me/messages"
-        "?$select=id,subject,from,receivedDateTime,bodyPreview,body,isRead,hasAttachments,webLink"
+        f"{GRAPH_BASE_URL}/me/mailFolders/inbox/messages"
+        "?$select=id,internetMessageId,subject,from,toRecipients,receivedDateTime,bodyPreview,body,isRead,hasAttachments,webLink"
         "&$orderby=receivedDateTime desc&$top=50"
     )
+    if received_after:
+        filter_expression = f"receivedDateTime ge {received_after}"
+        if received_before:
+            filter_expression += f" and receivedDateTime lt {received_before}"
+        next_url += f"&$filter={quote(filter_expression, safe='-:TZ.') }"
     messages: list[OutlookMessage] = []
     while next_url and len(messages) < limit:
         payload, token = _graph_get_with_token(next_url, token)
@@ -91,6 +109,10 @@ def list_inbox_messages(user_id: str, limit: int = 50) -> list[OutlookMessage]:
                 LOGGER.warning("Graph message without id was skipped.")
                 continue
             sender = (item.get("from") or {}).get("emailAddress", {}) or {}
+            receiver_name = _receiver_names_from_graph_item(item)
+            if config.is_internal_sender(str(sender.get("address") or "")):
+                LOGGER.info("Skipping internal Outlook message before body extraction message_id=%s.", message_id)
+                continue
             body_info = item.get("body") or {}
             body = _body_to_text(str(body_info.get("content", "")), str(body_info.get("contentType", "")))
             messages.append(_outlook_message_from_graph_item(user_id, item))
@@ -246,7 +268,7 @@ def _graph_get(url: str, token: str, retry_on_unauthorized: bool = True) -> dict
     return payload
 
 
-def _graph_get_with_token(url: str, token: str, retry_on_unauthorized: bool = True) -> tuple[dict[str, Any], str]:
+def _graph_get_with_token(url: str, token: str, retry_on_unauthorized: bool = True, retry_count: int = 0) -> tuple[dict[str, Any], str]:
     """GET Microsoft Graph JSON and return the access token that was actually used."""
     headers = _headers(str(token or ""))
     diagnostics = _graph_request_diagnostics("GET", url, str(token or ""), headers)
@@ -263,6 +285,12 @@ def _graph_get_with_token(url: str, token: str, retry_on_unauthorized: bool = Tr
     authenticate_header = _safe_authenticate_header(response)
     diagnostics.update(_graph_response_diagnostics(response, graph_error, authenticate_header))
     _remember_graph_request_diagnostic(diagnostics)
+    if response.status_code in RETRYABLE_GRAPH_STATUS_CODES and retry_count < 5:
+        retry_after = _retry_after_seconds(response)
+        delay = retry_after if retry_after is not None else min(60.0, 0.5 * (2 ** retry_count))
+        LOGGER.warning("Retryable Microsoft Graph response %s; retrying in %.1fs.", response.status_code, delay)
+        time.sleep(delay)
+        return _graph_get_with_token(url, token, retry_on_unauthorized, retry_count + 1)
     if response.status_code == 401 and retry_on_unauthorized:
         LOGGER.warning(
             "Microsoft Graph returned 401 code=%s message=%s authenticate_header=%s response_headers=%s response_body=%s; attempting silent token renewal once.",

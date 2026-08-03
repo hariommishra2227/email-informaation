@@ -36,9 +36,15 @@ Use AWS App Runner or ECS Fargate for the Streamlit web app, RDS PostgreSQL for 
 ```bash
 python -m venv .venv
 .venv\Scripts\activate
-pip install -r requirements.txt
+python -m pip install -r requirements-dev.txt
 streamlit run app.py
 ```
+
+`requirements.txt` contains runtime dependencies. `requirements-dev.txt` also installs the test tooling. Run the test suite with `python -m pytest -q`.
+
+## Development Container
+
+Open the repository root in VS Code and choose **Dev Containers: Reopen in Container**. The container uses Python 3.11, installs runtime and test dependencies, verifies them with `pip check`, forwards port 8501, and starts the Streamlit app automatically.
 
 ## Streamlit Secrets
 
@@ -126,9 +132,56 @@ Use this same value in Microsoft Entra, Streamlit Secrets, the authorization req
 - `services/graph_client.py`: Microsoft Graph `/me`, `/me/messages`, and demo mailbox support.
 - `services/email_processor.py`: Outlook/PDF/TXT/manual customer extraction pipeline.
 - `storage/database.py`: SQLite schema and parameterized persistence.
+- `database.py`: WAL-backed `contacts.db` connection and enterprise sync schema.
+- `repository.py`: repository operations for processed messages, contacts, and sync state.
+- `duplicate_handler.py`: email-first contact matching with phone and name/company fallback merging.
+- `sync.py`: complete-mailbox pagination, 100-message transactions, idempotency, and incremental synchronization.
 - `pages/Outlook Connector.py`: Outlook sign-in, inbox selection, extraction, registry save, and Excel export.
 - `pages/settings.py`: safe Microsoft configuration status.
+
+## Enterprise Mailbox Synchronization
+
+The Outlook Connector includes a **Sync Complete Mailbox** action. The first run follows every Microsoft Graph `@odata.nextLink` and processes the complete mailbox. Later runs request only messages received after the persisted high-water mark. Every Graph message ID is stored in `contacts.db` before the high-water mark advances, so reruns skip previously processed messages before extraction.
+
+Contacts are unique by normalized email. Records without a matching email fall back to normalized phone, then case-insensitive name plus company. Existing values are preserved and only missing fields are filled. Processing is committed atomically every 100 messages; a failed batch rolls back and does not advance synchronization state.
+
+`customer_data.db` remains in place for backward-compatible application records and OAuth persistence. `contacts.db` is dedicated to the enterprise mailbox synchronizer. Both database files and their SQLite sidecar files are excluded from Git.
 
 ## Limitations
 
 Live Microsoft login cannot be verified without administrator-provided tenant ID, client ID, new client Secret Value, registered redirect URI, mailbox access, and approved Graph delegated permissions. Attachments are listed by metadata only; attachment content extraction is not implemented.
+# Large mailbox extraction
+
+The Outlook Connector provides bounded mailbox extraction options for 100, 500, 1,000, 5,000, or all new messages. Microsoft Graph requests are limited to 50 messages and follow `@odata.nextLink`; message bodies are fetched one at a time, then processed in batches. Message metadata and terminal processing states are stored in SQLite, so reruns skip messages already marked `Unique`, `Duplicate`, `Incomplete`, or `Already Processed`.
+
+Extraction jobs are persisted in `extraction_jobs` with counts, status, and the Graph continuation link. If the Streamlit session or process stops, select Start / Resume Extraction again to continue the stored job. This is resumable foreground processing: it is not a background worker and requires an active Streamlit browser session while running.
+
+The database migration is automatic through `storage.database.initialize_database()`. It adds the job table and indexes for message status, normalized customer email/mobile, and source message ID. Graph throttling and transient 5xx responses honor `Retry-After` and use bounded exponential retry.
+
+Run with:
+
+```powershell
+python -m pytest -q
+streamlit run app.py
+```
+# Review queue, provenance, and optional LLM fallback
+
+Customer rows now retain field-level source, confidence, and evidence metadata. New installations and existing SQLite databases are migrated idempotently at startup; when an existing file is changed, a sibling `.pre-provenance.bak` backup is created before columns are added. Existing records are preserved.
+
+The Customer Registry includes a Review Queue. Filter by review status, inspect each field's source/confidence/evidence, edit values, and save an Approved, Needs Review, or Rejected decision. Corrections are written as `manual_review` values with confidence `1.0` and append-only entries in `review_audit`.
+
+LLM extraction is disabled by default and is only a fallback for unresolved fields. It uses the OpenAI Chat Completions JSON response format when enabled:
+
+```text
+LLM_ENABLED=true
+LLM_PROVIDER=openai
+LLM_API_KEY=...
+LLM_MODEL=gpt-4o-mini
+LLM_MAX_CALLS_PER_RUN=10
+LLM_MAX_INPUT_CHARS=12000
+LLM_TIMEOUT_SECONDS=20
+```
+
+The API key is read from environment variables or Streamlit secrets and is never logged. Responses require evidence present in the cleaned source, valid confidence, and deterministic email/company validation. Invalid responses, timeouts, missing keys, and call-limit exhaustion safely leave existing extraction values unchanged. Do not send attachments or production data to an external model without an approved privacy review.
+
+Run locally with `python -m pytest -q` and start Streamlit with `streamlit run app.py` from this directory. Disable the fallback with `LLM_ENABLED=false` (the default); tests mock the provider and do not require a paid API call.

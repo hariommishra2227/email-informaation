@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from io import BytesIO
 from typing import Any
+import math
 
 import pandas as pd
 from openpyxl.styles import Font, PatternFill
@@ -13,19 +14,7 @@ from openpyxl.utils import get_column_letter
 EXCEL_FILE_NAME = "customer_report.xlsx"
 WORKSHEET_NAME = "Customer Report"
 
-COLUMN_MAPPING = {
-    "contact_person_name": "Customer Name",
-    "email_id": "Email ID",
-    "organisation_name": "Organisation",
-    "mobile_number": "Mobile Number",
-    "input_source": "Source",
-    "designation": "Designation",
-    "address": "Address",
-    "subject": "Subject",
-    "extraction_confidence": "Extraction Confidence",
-    "duplicate_status": "Duplicate Status",
-    "confidence_score": "Confidence Score",
-}
+COLUMN_MAPPING = {column: column for column in ("Client Name", "Contact Person Name", "Contact Email", "Phone Number", "Full Address", "Location", "Subject", "Email Date")}
 
 HEADER_FILL = PatternFill(fill_type="solid", fgColor="D9EAF7")
 EVEN_ROW_FILL = PatternFill(fill_type="solid", fgColor="F7FBFF")
@@ -40,12 +29,21 @@ def _build_export_rows(customers: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for customer in customers:
         rows.append(
             {
-                column_name: customer.get(source_key, "")
+                column_name: _excel_value(customer.get(source_key, ""))
                 for source_key, column_name in COLUMN_MAPPING.items()
             }
         )
 
     return rows
+
+
+def _excel_value(value: Any) -> Any:
+    """Keep missing values empty so Excel receives a blank cell."""
+    if value is None:
+        return ""
+    if isinstance(value, float) and math.isnan(value):
+        return ""
+    return value
 
 
 def _auto_adjust_column_widths(worksheet: Any) -> None:

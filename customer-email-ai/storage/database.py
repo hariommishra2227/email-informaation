@@ -31,6 +31,7 @@ from database.models import (
     OAuthTokenCache,
 )
 from models import CustomerRecord, OutlookMessage
+from duplicate_detector import normalize_email, normalize_mobile
 
 
 LOGGER = logging.getLogger(__name__)
@@ -496,6 +497,60 @@ def list_outlook_message_rows(user_id: str) -> list[dict[str, Any]]:
         }
         for row in rows
     ]
+
+
+def update_customer_review(record_id: int, fields: dict[str, Any], reviewed_by: str = "", notes: str = "") -> None:
+    """Apply reviewed corrections while recording every changed field."""
+    with get_connection() as connection:
+        row = connection.execute("SELECT * FROM customers WHERE id = ?", (int(record_id),)).fetchone()
+        if row is None:
+            raise ValueError("Customer record not found.")
+        now = utc_now()
+        updates: dict[str, Any] = {}
+        for field, new_value in fields.items():
+            if field not in {"contact_name", "email", "organisation", "mobile", "designation", "address", "subject"}:
+                continue
+            old_value = str(row[field] or "")
+            new_value = str(new_value or "").strip()
+            if old_value == new_value:
+                continue
+            source_field = {"contact_name": "name_source", "email": "email_source", "organisation": "organisation_source", "mobile": "mobile_source", "designation": "designation_source", "address": "address_source"}.get(field)
+            old_source = str(row[source_field] or "") if source_field else ""
+            if source_field:
+                updates[source_field] = "manual_review"
+                updates[source_field.replace("_source", "_confidence")] = 1.0
+            updates[field] = new_value
+            if field == "email":
+                updates["normalized_email"] = normalize_email(new_value)
+            elif field == "mobile":
+                updates["normalized_mobile"] = normalize_mobile(new_value)
+            connection.execute("INSERT INTO review_audit (record_id, field_name, old_value, new_value, old_source, new_source, reviewed_at, reviewed_by, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (record_id, field, old_value, new_value, old_source, "manual_review", now, reviewed_by, notes))
+        updates.update({"review_status": fields.get("review_status", "Approved"), "reviewed_at": now, "reviewed_by": reviewed_by, "correction_notes": notes})
+        assignments = ", ".join(f"{key} = ?" for key in updates)
+        connection.execute(f"UPDATE customers SET {assignments} WHERE id = ?", (*updates.values(), int(record_id)))
+
+
+def list_review_audit(record_id: int | None = None) -> list[dict[str, Any]]:
+    query = "SELECT * FROM review_audit"
+    params: tuple[Any, ...] = ()
+    if record_id is not None:
+        query += " WHERE record_id = ?"
+        params = (int(record_id),)
+    query += " ORDER BY reviewed_at DESC, id DESC"
+    with get_connection() as connection:
+        return [dict(row) for row in connection.execute(query, params).fetchall()]
+
+
+def list_pending_outlook_messages(user_id: str) -> list[dict[str, Any]]:
+    """Return cached messages that still need extraction after a restart."""
+    with get_connection() as connection:
+        rows = connection.execute(
+            """SELECT * FROM outlook_messages
+            WHERE user_id = ? AND processing_status IN ('Pending', 'Processing', 'Failed')
+            ORDER BY received_datetime ASC""",
+            (user_id,),
+        ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def customer_duplicate_exists(user_id: str, normalized_email: str, normalized_mobile: str) -> bool:
