@@ -7,6 +7,7 @@ from sqlalchemy import (
     Boolean,
     DateTime,
     ForeignKey,
+    Float,
     Index,
     Integer,
     LargeBinary,
@@ -73,6 +74,10 @@ class Email(Base):
     is_read: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     has_attachments: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     extraction_status: Mapped[str] = mapped_column(String(64), default="Pending", nullable=False)
+    retry_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    max_retry_attempts: Mapped[int] = mapped_column(Integer, default=5, nullable=False)
+    last_error: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    next_retry_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
@@ -97,8 +102,45 @@ class ExtractedContact(Base):
     normalized_phone: Mapped[str] = mapped_column(String(64), default="", nullable=False)
     designation: Mapped[str] = mapped_column(String(255), default="", nullable=False)
     address: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    location: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    subject: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    email_date: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    source: Mapped[str] = mapped_column(String(64), default="Manual", nullable=False)
+    source_message_id: Mapped[str] = mapped_column(String(512), default="", nullable=False)
     extraction_confidence: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     status: Mapped[str] = mapped_column(String(64), default="Unique", nullable=False)
+    name_source: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    name_confidence: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    name_evidence: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    email_source: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    email_confidence: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    email_evidence: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    organisation_source: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    organisation_confidence: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    organisation_evidence: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    mobile_source: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    mobile_confidence: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    mobile_evidence: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    designation_source: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    designation_confidence: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    designation_evidence: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    address_source: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    address_confidence: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    address_evidence: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    extraction_method: Mapped[str] = mapped_column(String(64), default="regex_spacy", nullable=False)
+    llm_used: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    llm_model: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    llm_error: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    review_status: Mapped[str] = mapped_column(String(64), default="Needs Review", nullable=False, index=True)
+    reviewed_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reviewed_by: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    correction_notes: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    internet_message_id: Mapped[str] = mapped_column(String(998), default="", nullable=False)
+    sender_email: Mapped[str] = mapped_column(String(320), default="", nullable=False, index=True)
+    sender_name: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    receiver_name: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    sender_domain: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    processed_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
@@ -111,6 +153,22 @@ class EmailContact(Base):
     email_id: Mapped[int] = mapped_column(ForeignKey("emails.id"), nullable=False, index=True)
     contact_id: Mapped[int] = mapped_column(ForeignKey("extracted_contacts.id"), nullable=False, index=True)
     created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class ReviewAudit(Base):
+    __tablename__ = "review_audit"
+    __table_args__ = (Index("ix_review_audit_record_id", "record_id"),)
+
+    id: Mapped[int] = mapped_column(BigIntPk, primary_key=True, autoincrement=True)
+    record_id: Mapped[int] = mapped_column(ForeignKey("extracted_contacts.id"), nullable=False)
+    field_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    old_value: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    new_value: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    old_source: Mapped[str] = mapped_column(String(128), default="", nullable=False)
+    new_source: Mapped[str] = mapped_column(String(128), default="", nullable=False)
+    reviewed_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    reviewed_by: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    notes: Mapped[str] = mapped_column(Text, default="", nullable=False)
 
 
 class Attachment(Base):
@@ -150,6 +208,9 @@ class ProcessingJob(Base):
     mailbox_id: Mapped[int | None] = mapped_column(ForeignKey("connected_mailboxes.id"), nullable=True, index=True)
     payload_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
     error_message: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    started_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 

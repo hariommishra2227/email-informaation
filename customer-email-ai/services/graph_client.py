@@ -25,7 +25,16 @@ LOGGER = logging.getLogger(__name__)
 GRAPH_BASE_URL = "https://graph.microsoft.com/v1.0"
 REQUEST_TIMEOUT_SECONDS = 20
 MAX_GRAPH_RETRIES = 4
+RETRYABLE_GRAPH_STATUS_CODES = {429, 500, 502, 503, 504}
 LAST_GRAPH_REQUEST_DIAGNOSTIC: dict[str, str] = {}
+
+
+class MessagePage(list[OutlookMessage]):
+    """List of Outlook messages with associated Graph delta cursor."""
+
+    def __init__(self, messages: list[OutlookMessage], delta_link: str = "") -> None:
+        super().__init__(messages)
+        self.delta_link = delta_link
 
 
 class GraphApiError(RuntimeError):
@@ -164,7 +173,7 @@ def iter_mailbox_message_pages(
     *,
     page_size: int | None = None,
     delta_link: str = "",
-) -> Iterator[tuple[list[OutlookMessage], str]]:
+) -> Iterator[MessagePage]:
     """Yield Microsoft Graph message pages and the latest delta link.
 
     The delta link is returned for persistence only and must not be logged or
@@ -174,7 +183,7 @@ def iter_mailbox_message_pages(
     if config.is_mock_mode():
         messages = list_mock_messages(user_id)
         for index in range(0, len(messages), resolved_page_size):
-            yield messages[index:index + resolved_page_size], "mock-delta-link"
+            yield MessagePage(messages[index:index + resolved_page_size], "mock-delta-link")
         return
 
     token = graph_auth.get_valid_access_token()
@@ -196,7 +205,7 @@ def iter_mailbox_message_pages(
                 continue
             messages.append(_outlook_message_from_graph_item(user_id, item))
         latest_delta_link = str(payload.get("@odata.deltaLink") or latest_delta_link or "")
-        yield messages, latest_delta_link
+        yield MessagePage(messages, latest_delta_link)
         next_url = payload.get("@odata.nextLink")
 
 
@@ -218,7 +227,26 @@ def _outlook_message_from_graph_item(user_id: str, item: dict[str, Any]) -> Outl
         has_attachments=bool(item.get("hasAttachments")),
         attachment_names=[],
         internet_message_id=str(item.get("internetMessageId") or ""),
+        receiver_name=_receiver_names_from_graph_item(item),
     )
+
+
+def _receiver_names_from_graph_item(item: dict[str, Any]) -> str:
+    """Return unique ordered recipient display names from a Graph message."""
+    names: list[str] = []
+    seen: set[str] = set()
+    for key in ("toRecipients", "ccRecipients", "bccRecipients"):
+        recipients = item.get(key) or []
+        if not isinstance(recipients, list):
+            continue
+        for recipient in recipients:
+            email_address = (recipient or {}).get("emailAddress") or {}
+            name = str(email_address.get("name") or "").strip()
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            names.append(name)
+    return "; ".join(names)
 
 
 def _datetime_sort_key(value: str) -> str:

@@ -144,15 +144,37 @@ EMAIL_FETCH_BATCH_SIZE = int(_secret_value("EMAIL_FETCH_BATCH_SIZE", "250") or "
 EMAIL_PROCESS_BATCH_SIZE = int(_secret_value("EMAIL_PROCESS_BATCH_SIZE", "100") or "100")
 JOB_BACKEND = _secret_value("JOB_BACKEND", "local").strip().lower() or "local"
 STORAGE_BACKEND = _secret_value("STORAGE_BACKEND", "local").strip().lower() or "local"
+ATTACHMENT_PROCESSING_ENABLED = _secret_value("ATTACHMENT_PROCESSING_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
 AWS_REGION = _secret_value("AWS_REGION", "ap-south-1").strip() or "ap-south-1"
 AWS_S3_BUCKET = _secret_value("AWS_S3_BUCKET", "").strip()
 AWS_SQS_QUEUE_URL = _secret_value("AWS_SQS_QUEUE_URL", "").strip()
+TOKEN_CACHE_ENCRYPTION_KEY = _secret_value("TOKEN_CACHE_ENCRYPTION_KEY", "").strip()
 LOG_LEVEL = _secret_value("LOG_LEVEL", "INFO").strip().upper() or "INFO"
 LOCAL_ATTACHMENT_DIR = Path(_secret_value("LOCAL_ATTACHMENT_DIR", str(BASE_DIR / "local_attachments")))
 EXPORT_LIMIT = int(_secret_value("EXPORT_LIMIT", "100000") or "100000")
 EXPORT_CHUNK_SIZE = int(_secret_value("EXPORT_CHUNK_SIZE", "1000") or "1000")
 DB_POOL_SIZE = int(_secret_value("DB_POOL_SIZE", "5") or "5")
 DB_MAX_OVERFLOW = int(_secret_value("DB_MAX_OVERFLOW", "10") or "10")
+
+
+def validate_runtime_config() -> None:
+    """Fail early for unsafe production configuration."""
+    if EMAIL_FETCH_BATCH_SIZE <= 0 or EMAIL_FETCH_BATCH_SIZE > 999:
+        raise RuntimeError("EMAIL_FETCH_BATCH_SIZE must be between 1 and 999.")
+    if EMAIL_PROCESS_BATCH_SIZE <= 0 or EMAIL_PROCESS_BATCH_SIZE > 1000:
+        raise RuntimeError("EMAIL_PROCESS_BATCH_SIZE must be between 1 and 1000.")
+    if JOB_BACKEND not in {"local", "sqs"}:
+        raise RuntimeError("JOB_BACKEND must be local or sqs.")
+    if STORAGE_BACKEND not in {"local", "s3"}:
+        raise RuntimeError("STORAGE_BACKEND must be local or s3.")
+    if APP_ENV == "production" and not DATABASE_URL:
+        raise RuntimeError("DATABASE_URL is required in production.")
+    if APP_ENV == "production" and not TOKEN_CACHE_ENCRYPTION_KEY:
+        raise RuntimeError("TOKEN_CACHE_ENCRYPTION_KEY is required in production.")
+    if STORAGE_BACKEND == "s3" and not AWS_S3_BUCKET:
+        raise RuntimeError("AWS_S3_BUCKET is required when STORAGE_BACKEND=s3.")
+    if JOB_BACKEND == "sqs" and not AWS_SQS_QUEUE_URL:
+        raise RuntimeError("AWS_SQS_QUEUE_URL is required when JOB_BACKEND=sqs.")
 
 OUTLOOK_MODE_MOCK = "mock"
 OUTLOOK_MODE_LIVE = "live"

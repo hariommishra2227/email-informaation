@@ -1,0 +1,54 @@
+name: AWS Production Readiness
+
+on:
+  pull_request:
+  push:
+    branches:
+      - agent/fix-aws-production-blockers
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: customer_email_ai
+          POSTGRES_USER: app_user
+          POSTGRES_PASSWORD: app_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U app_user -d customer_email_ai"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    defaults:
+      run:
+        working-directory: customer-email-ai
+    env:
+      APP_ENV: test
+      DATABASE_URL: postgresql+psycopg://app_user:app_password@localhost:5432/customer_email_ai
+      TOKEN_CACHE_ENCRYPTION_KEY: ci-token-cache-key
+      OUTLOOK_MODE: mock
+      JOB_BACKEND: local
+      STORAGE_BACKEND: local
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: customer-email-ai/requirements.txt
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -r requirements.txt pytest
+      - run: python -m compileall .
+      - run: python -m alembic -c alembic.ini upgrade head
+      - run: python -m alembic -c alembic.ini current
+      - run: python -m pytest -q
+      - run: python -m pip check
+      - run: docker compose config
+      - run: docker build .
+      - name: Secret scan
+        run: |
+          ! grep -RInE "AKIA[0-9A-Z]{16}|-----BEGIN (RSA |OPENSSH |)PRIVATE KEY-----|client_secret *= *['\"][^'\"]{12,}|refresh_token *= *['\"][^'\"]{12,}" .

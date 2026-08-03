@@ -20,10 +20,11 @@ try:
     from page_context import initialize_outlook_session_state
     from repository import EmailSyncRepository
     from services import graph_auth, graph_client
-    from services.customer_service import get_customers, to_export_rows, to_business_output, BUSINESS_COLUMNS
+    from services.customer_service import get_customer_page, get_customers, to_export_rows, to_business_output, BUSINESS_COLUMNS
+    from services.export_service import cleanup_export, create_large_excel_export
     from services.email_processor import process_outlook_message
     from storage import database
-    from sync import sync_outlook_mailbox
+    from workers.job_handler import enqueue_email_sync
 except Exception as exc:  # pragma: no cover
     IMPORT_ERROR = exc
 
@@ -113,7 +114,7 @@ def render(user_id: str) -> None:
         return
 
     try:
-        filtered = _filter_messages(messages, search_text, read_filter, date_range)
+        filtered = _filter_messages(messages, search_text, date_filter, date_range)
         selected_ids = _render_inbox_list(filtered, status_rows)
     except Exception as exc:
         LOGGER.exception("Outlook inbox list failed to render.")
@@ -552,13 +553,20 @@ def _update_selected_outlook_messages(messages: list, select_all: bool) -> list[
 
 def _render_excel_export(user_id: str, label: str = "Export to Excel") -> None:
     """Render Outlook registry Excel export button."""
-    rows = get_customers(user_id)
-    if not rows:
+    page = get_customer_page(user_id, page=1, page_size=1)
+    if not page["rows"]:
         st.button(label, disabled=True, use_container_width=True)
         return
+    export_path = None
+    try:
+        export_path = create_large_excel_export(user_id)
+        data = export_path.read_bytes()
+    finally:
+        if export_path is not None:
+            cleanup_export(export_path)
     st.download_button(
         label,
-        data=export_customers_to_excel(to_export_rows(rows)),
+        data=data,
         file_name=EXCEL_FILE_NAME,
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
@@ -618,16 +626,12 @@ def _import_messages(user_id: str, messages: list, message_ids: list[str]) -> No
 
 
 def _sync_mailbox(user_id: str) -> None:
-    """Run enterprise full/incremental mailbox synchronization."""
+    """Queue enterprise full/incremental mailbox synchronization."""
     st.subheader("Sync Status")
-    progress = st.progress(0)
-
-    def update_progress(processed_count: int, total_count: int) -> None:
-        progress.progress(0 if total_count == 0 else processed_count / total_count)
-
     try:
-        result = sync_outlook_mailbox(user_id, progress_callback=update_progress)
+        result = enqueue_email_sync(user_id)
         st.session_state["outlook_sync_summary"] = result
+        st.success(f"Mailbox sync {result.get('status', 'queued')} as job #{result.get('job_id', '')}.")
     except Exception as exc:
         LOGGER.exception("Enterprise mailbox sync failed.")
         st.session_state["outlook_sync_summary"] = None
@@ -644,6 +648,7 @@ def _render_sync_status() -> None:
         return
 
     summary = st.session_state.get("outlook_sync_summary")
+    latest_job = database.get_latest_sync_job(config.DEFAULT_USER_ID)
     st.subheader("Database Statistics")
     stat_cols = st.columns(3)
     with stat_cols[0]:
@@ -654,22 +659,14 @@ def _render_sync_status() -> None:
         st.metric("Processed Emails", stats.get("processed_emails", 0))
 
     if not summary:
+        if latest_job:
+            st.info(f"Latest sync job #{latest_job['id']}: {latest_job['status']}")
         return
 
     st.subheader("Sync Status")
-    result_cols = st.columns(6)
-    labels = [
-        ("Processed Emails", "processed_emails"),
-        ("Skipped Emails", "skipped_emails"),
-        ("New Contacts", "new_contacts"),
-        ("Updated Contacts", "updated_contacts"),
-        ("Duplicates Removed", "duplicates_removed"),
-        ("Total Processing Time", "total_processing_time"),
-    ]
-    for index, (label, key) in enumerate(labels):
-        with result_cols[index]:
-            value = getattr(summary, key, 0)
-            st.metric(label, f"{value}s" if key == "total_processing_time" else value)
+    st.info(f"Latest sync request: {summary.get('status', 'unknown')} job #{summary.get('job_id', '')}")
+    if latest_job:
+        st.caption(f"Persisted job status: {latest_job['status']}")
 
 
 def _render_import_result() -> None:
@@ -699,15 +696,23 @@ def _render_import_result() -> None:
 def _render_customer_preview(user_id: str) -> None:
     """Render extracted Outlook customers below the inbox."""
     st.subheader("Review Extracted Records")
-    rows = [row for row in get_customers(user_id) if row.get("source") == "Outlook"]
+    page = get_customer_page(user_id, page=1, page_size=50, source="Outlook", status="", search="", sort_by="created_at")
+    rows = page["rows"]
     if not rows:
         st.info("Extracted Outlook customer records will appear here after import.")
         return
     preview = pd.DataFrame([to_business_output(row) for row in rows], columns=BUSINESS_COLUMNS)
     st.dataframe(preview, hide_index=True, use_container_width=True)
+    export_path = None
+    try:
+        export_path = create_large_excel_export(user_id)
+        data = export_path.read_bytes()
+    finally:
+        if export_path is not None:
+            cleanup_export(export_path)
     st.download_button(
         "Download Excel Report",
-        data=export_customers_to_excel(to_export_rows(rows)),
+        data=data,
         file_name=EXCEL_FILE_NAME,
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,

@@ -58,11 +58,12 @@ class OutlookMailboxSyncService:
         self.repository.set_sync_state(user_id, status="Running", processed_records=0)
 
         try:
-            for messages, latest_delta_link in graph_client.iter_mailbox_message_pages(
+            for messages in graph_client.iter_mailbox_message_pages(
                 user_id,
                 page_size=fetch_size,
                 delta_link=delta_link,
             ):
+                latest_delta_link = getattr(messages, "delta_link", "")
                 page_total = len(messages)
                 for index, message in enumerate(messages, start=1):
                     processed_seen += 1
@@ -90,7 +91,7 @@ class OutlookMailboxSyncService:
                     except Exception as exc:
                         LOGGER.exception("Mailbox sync failed for message hash=%s", _safe_message_id(message.message_id))
                         result.failed_emails += 1
-                        database.set_message_status(user_id, message.message_id, "Failed")
+                        database.record_email_failure(user_id, message.message_id, str(exc))
                         database.write_processing_log(user_id, message.message_id, "ERROR", "Mailbox sync failed", str(exc))
                     finally:
                         if progress_callback is not None:

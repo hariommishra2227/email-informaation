@@ -7,6 +7,8 @@ from typing import Any
 from models import CustomerRecord
 from storage import database
 
+BUSINESS_COLUMNS = ("Client Name", "Contact Person Name", "Contact Email", "Phone Number", "Full Address", "Location", "Subject", "Email Date")
+
 
 def save_customer(customer: CustomerRecord) -> int:
     """Persist a manually extracted or uploaded customer."""
@@ -26,6 +28,7 @@ def get_customer_page(
     page_size: int = 50,
     sender: str = "",
     organisation: str = "",
+    source: str = "",
     status: str = "",
     search: str = "",
     sort_by: str = "created_at",
@@ -38,6 +41,7 @@ def get_customer_page(
         page_size=page_size,
         sender=sender,
         organisation=organisation,
+        source=source,
         status=status,
         search=search,
         sort_by=sort_by,
@@ -53,4 +57,34 @@ def iter_customer_export_rows(user_id: str | None = None, *, chunk_size: int = 1
 
 def to_export_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Convert database rows into the existing Excel export schema."""
-    return [to_business_output(row) for row in rows]
+    return [
+        {
+            "contact_person_name": row.get("contact_name", ""),
+            "organisation_name": row.get("organisation", ""),
+            "email_id": row.get("email", ""),
+            "mobile_number": row.get("mobile", ""),
+            "normalized_phone": row.get("normalized_mobile", ""),
+            "designation": row.get("designation", ""),
+            "address": row.get("address", ""),
+            "subject": row.get("subject", ""),
+            "input_source": row.get("source", ""),
+            "extraction_confidence": row.get("confidence", ""),
+            "duplicate_status": row.get("status", ""),
+            "confidence_score": 100 if row.get("status") == "Duplicate" else 0,
+        }
+        for row in rows
+    ]
+
+
+def to_business_output(row: dict[str, Any]) -> dict[str, Any]:
+    """Convert one database row into the business-facing registry/export shape."""
+    return {
+        "Client Name": row.get("organisation", ""),
+        "Contact Person Name": row.get("contact_name", ""),
+        "Contact Email": row.get("email", ""),
+        "Phone Number": row.get("mobile", ""),
+        "Full Address": row.get("address", ""),
+        "Location": row.get("location", ""),
+        "Subject": row.get("subject", ""),
+        "Email Date": row.get("email_date", ""),
+    }
