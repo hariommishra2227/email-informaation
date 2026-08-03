@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.12-slim AS base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -17,4 +17,9 @@ USER app
 
 EXPOSE 8501
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 CMD python -c "from services.health import health_status; raise SystemExit(0 if health_status().get('database') == 'ok' else 1)"
+
+FROM base AS web
 CMD ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0"]
+
+FROM base AS worker
+CMD ["python", "-m", "workers.email_sync_worker"]

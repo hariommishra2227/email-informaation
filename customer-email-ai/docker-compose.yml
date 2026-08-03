@@ -1,6 +1,8 @@
 services:
   app:
-    build: .
+    build:
+      context: .
+      target: web
     ports:
       - "8501:8501"
     environment:
@@ -17,6 +19,7 @@ services:
       STORAGE_BACKEND: local
       AWS_REGION: ap-south-1
       LOG_LEVEL: INFO
+      TOKEN_CACHE_ENCRYPTION_KEY: ${TOKEN_CACHE_ENCRYPTION_KEY:-local-dev-token-cache-key}
     depends_on:
       postgres:
         condition: service_healthy
@@ -25,6 +28,23 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+
+  worker:
+    profiles: ["worker"]
+    build:
+      context: .
+      target: worker
+    environment:
+      APP_ENV: development
+      DATABASE_URL: postgresql+psycopg://app_user:app_password@postgres:5432/customer_email_ai
+      JOB_BACKEND: sqs
+      STORAGE_BACKEND: local
+      AWS_REGION: ap-south-1
+      AWS_SQS_QUEUE_URL: ${AWS_SQS_QUEUE_URL:-}
+      TOKEN_CACHE_ENCRYPTION_KEY: ${TOKEN_CACHE_ENCRYPTION_KEY:-local-dev-token-cache-key}
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   postgres:
     image: postgres:16-alpine
