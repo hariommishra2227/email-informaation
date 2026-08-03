@@ -9,8 +9,9 @@ import streamlit as st
 
 IMPORT_ERROR: Exception | None = None
 try:
-    from excel_exporter import EXCEL_FILE_NAME, export_customers_to_excel
-    from services.customer_service import get_customers, to_export_rows, to_business_output, BUSINESS_COLUMNS
+    from excel_exporter import EXCEL_FILE_NAME
+    from services.customer_service import get_customer_page, to_business_output, BUSINESS_COLUMNS
+    from services.export_service import cleanup_export, create_large_excel_export
     from storage import database
 except Exception as exc:  # pragma: no cover
     IMPORT_ERROR = exc
@@ -25,7 +26,6 @@ def render(user_id: str) -> None:
     if IMPORT_ERROR is not None:
         st.error(f"Customer Registry import failed: {IMPORT_ERROR}")
         return
-    rows = get_customers(user_id)
     controls = st.columns([0.5, 0.25, 0.25])
     with controls[0]:
         search = st.text_input("Search", "")
@@ -33,14 +33,27 @@ def render(user_id: str) -> None:
         status_filter = st.selectbox("Review status", ["All", "Approved", "Needs Review", "Rejected"])
     with controls[2]:
         source_filter = st.selectbox("Source filter", ["All", "Outlook", "PDF", "TXT", "Manual"])
+    paging = st.columns([0.25, 0.25, 0.25, 0.25])
+    with paging[0]:
+        page_number = int(st.number_input("Page", min_value=1, value=1, step=1))
+    with paging[1]:
+        page_size = int(st.number_input("Rows per page", min_value=1, max_value=100, value=50, step=10))
+    with paging[2]:
+        sort_by = st.selectbox("Sort by", ["created_at", "organisation", "email", "status"])
+    with paging[3]:
+        sort_dir = st.selectbox("Sort", ["desc", "asc"])
 
-    if status_filter != "All":
-        rows = [row for row in rows if row.get("review_status", "Needs Review") == status_filter]
-    if source_filter != "All":
-        rows = [row for row in rows if row.get("source") == source_filter]
-    if search.strip():
-        needle = search.strip().lower()
-        rows = [row for row in rows if needle in " ".join(str(value).lower() for value in row.values())]
+    page = get_customer_page(
+        user_id,
+        page=page_number,
+        page_size=page_size,
+        source="" if source_filter == "All" else source_filter,
+        status="" if status_filter == "All" else status_filter,
+        search=search,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
+    )
+    rows = page["rows"]
 
     if not rows:
         st.info("No customers match the current filters.")
@@ -48,6 +61,7 @@ def render(user_id: str) -> None:
 
     display = pd.DataFrame([to_business_output(row) for row in rows], columns=DISPLAY_COLUMNS)
     st.dataframe(display, hide_index=True, use_container_width=True)
+    st.caption(f"Showing {len(rows)} of {page['total']} matching records.")
 
     st.subheader("Review Queue")
     for row in rows:
@@ -73,14 +87,20 @@ def render(user_id: str) -> None:
                     st.success("Review saved with audit history.")
                     st.rerun()
 
-    export_rows = to_export_rows(rows)
     csv_buffer = StringIO()
     display.to_csv(csv_buffer, index=False)
+    export_path = None
+    try:
+        export_path = create_large_excel_export(user_id)
+        excel_data = export_path.read_bytes()
+    finally:
+        if export_path is not None:
+            cleanup_export(export_path)
     download_cols = st.columns(2)
     with download_cols[0]:
         st.download_button(
             "Download Excel",
-            data=export_customers_to_excel(export_rows),
+            data=excel_data,
             file_name=EXCEL_FILE_NAME,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,

@@ -115,7 +115,7 @@ def detect_duplicates(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 name_similarity = similarity_score(record.get("contact_person_name", ""), other_record.get("contact_person_name", ""))
                 organisation_similarity = similarity_score(record.get("organisation_name", ""), other_record.get("organisation_name", ""))
 
-                if name_similarity >= 85 and organisation_similarity >= 85:
+                if name_similarity >= 78 and organisation_similarity >= 85:
                     status = "Possible Duplicate"
                     best_confidence = max(best_confidence, round((name_similarity + organisation_similarity) / 2))
 

@@ -1,0 +1,3 @@
+.pytest-tmp/
+.pytest-tmp*/
+customer_report.xlsx

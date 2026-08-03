@@ -32,7 +32,7 @@ def create_large_excel_export(
         path = Path(handle.name)
     for chunk in iter_customer_export_rows(user_id, chunk_size=config.EXPORT_CHUNK_SIZE, limit=export_limit):
         for row in chunk:
-            worksheet.append([row.get(column, "") for column in COLUMN_MAPPING.values()])
+            worksheet.append([row.get(column, "") for column in COLUMN_MAPPING.keys()])
             written += 1
         if progress_callback is not None:
             progress_callback(written)

@@ -10,7 +10,7 @@ import json
 import logging
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -22,16 +22,21 @@ import config
 from database.connection import create_all_for_local_tests, db_session, reset_engine, utc_now as _utc_now
 from database.models import (
     ApplicationUser,
+    Attachment,
     ConnectedMailbox,
     Email,
+    EmailContact,
     ExtractedContact,
     FailedProcessingRecord,
     MailboxSyncState,
     OAuthAuthFlow,
     OAuthTokenCache,
+    ProcessingJob,
+    ReviewAudit,
 )
 from models import CustomerRecord, OutlookMessage
 from duplicate_detector import normalize_email, normalize_mobile
+from services.token_cache_crypto import decrypt_cache, encrypt_cache
 
 
 LOGGER = logging.getLogger(__name__)
@@ -200,17 +205,18 @@ def store_oauth_token_cache(cache_owner: str, cache_json: str, account: dict[str
     with db_session() as session:
         row = session.get(OAuthTokenCache, cache_owner)
         account_json = json.dumps(account or {})
+        encrypted_cache = encrypt_cache(cache_json)
         if row is None:
             session.add(
                 OAuthTokenCache(
                     cache_owner=cache_owner,
-                    cache_json=cache_json,
+                    cache_json=encrypted_cache,
                     account_json=account_json,
                     updated_at=int(updated_at),
                 )
             )
         else:
-            row.cache_json = cache_json
+            row.cache_json = encrypted_cache
             row.account_json = account_json
             row.updated_at = int(updated_at)
 
@@ -225,7 +231,10 @@ def load_oauth_token_cache(cache_owner: str) -> tuple[str, dict[str, Any] | None
             account = json.loads(row.account_json or "{}")
         except json.JSONDecodeError:
             account = {}
-        return row.cache_json or "", account if isinstance(account, dict) else {}
+        cache_json, should_migrate = decrypt_cache(row.cache_json or "")
+        if should_migrate:
+            row.cache_json = encrypt_cache(cache_json)
+        return cache_json, account if isinstance(account, dict) else {}
 
 
 def delete_oauth_token_cache(cache_owner: str) -> None:
@@ -292,6 +301,24 @@ def set_message_status(user_id: str, message_id: str, status: str) -> None:
             row.extraction_status = status
 
 
+def record_email_failure(user_id: str, message_id: str, error_message: str, *, max_attempts: int = 5) -> None:
+    """Record retryable email failure metadata."""
+    with db_session() as session:
+        mailbox = ensure_mailbox(session, user_id)
+        row = session.scalar(select(Email).where(Email.mailbox_id == mailbox.id, Email.graph_message_id == message_id))
+        if row is None:
+            return
+        row.retry_count = int(row.retry_count or 0) + 1
+        row.max_retry_attempts = max_attempts
+        row.last_error = str(error_message or "")[:1000]
+        if row.retry_count >= max_attempts:
+            row.extraction_status = "TerminalFailed"
+            row.next_retry_at = None
+        else:
+            row.extraction_status = "Retryable"
+            row.next_retry_at = _utc_now() + timedelta(minutes=min(60, 2 ** row.retry_count))
+
+
 def message_was_imported(user_id: str, message_id: str) -> bool:
     """Return whether a message has already completed import."""
     return message_processing_status(user_id, message_id) in {"Unique", "Duplicate", "Incomplete", "Already Processed"}
@@ -324,8 +351,43 @@ def insert_customer(customer: CustomerRecord) -> int:
                 normalized_phone=customer.normalized_mobile,
                 designation=customer.designation,
                 address=customer.address,
+                location=customer.location,
+                subject=customer.subject,
+                email_date=customer.email_date,
+                source=customer.source,
+                source_message_id=customer.source_message_id,
                 extraction_confidence=int(customer.confidence or 0),
                 status=customer.status,
+                name_source=customer.name_source,
+                name_confidence=customer.name_confidence,
+                name_evidence=customer.name_evidence,
+                email_source=customer.email_source,
+                email_confidence=customer.email_confidence,
+                email_evidence=customer.email_evidence,
+                organisation_source=customer.organisation_source,
+                organisation_confidence=customer.organisation_confidence,
+                organisation_evidence=customer.organisation_evidence,
+                mobile_source=customer.mobile_source,
+                mobile_confidence=customer.mobile_confidence,
+                mobile_evidence=customer.mobile_evidence,
+                designation_source=customer.designation_source,
+                designation_confidence=customer.designation_confidence,
+                designation_evidence=customer.designation_evidence,
+                address_source=customer.address_source,
+                address_confidence=customer.address_confidence,
+                address_evidence=customer.address_evidence,
+                extraction_method=customer.extraction_method,
+                llm_used=customer.llm_used,
+                llm_model=customer.llm_model,
+                llm_error=customer.llm_error,
+                review_status=customer.review_status,
+                reviewed_by=customer.reviewed_by,
+                correction_notes=customer.correction_notes,
+                internet_message_id=customer.internet_message_id,
+                sender_email=customer.sender_email,
+                sender_name=customer.sender_name,
+                receiver_name=customer.receiver_name,
+                sender_domain=customer.sender_domain,
             )
             session.add(contact)
             try:
@@ -334,6 +396,22 @@ def insert_customer(customer: CustomerRecord) -> int:
                 session.rollback()
                 raise
         session.flush()
+        if customer.source_message_id:
+            email = session.scalar(
+                select(Email).where(
+                    Email.mailbox_id == mailbox.id,
+                    Email.graph_message_id == customer.source_message_id,
+                )
+            )
+            if email is not None:
+                link = session.scalar(
+                    select(EmailContact).where(
+                        EmailContact.email_id == email.id,
+                        EmailContact.contact_id == contact.id,
+                    )
+                )
+                if link is None:
+                    session.add(EmailContact(email_id=email.id, contact_id=contact.id))
         return int(contact.id)
 
 
@@ -347,6 +425,10 @@ def _merge_contact(existing: ExtractedContact, incoming: CustomerRecord) -> None
         "normalized_phone": incoming.normalized_mobile,
         "designation": incoming.designation,
         "address": incoming.address,
+        "subject": incoming.subject,
+        "source_message_id": incoming.source_message_id,
+        "sender_email": incoming.sender_email,
+        "sender_name": incoming.sender_name,
     }.items():
         if not str(getattr(existing, attr) or "").strip() and str(value or "").strip():
             setattr(existing, attr, value)
@@ -365,11 +447,39 @@ def _contact_row(contact: ExtractedContact, user_id: str) -> dict[str, Any]:
         "normalized_mobile": contact.normalized_phone,
         "designation": contact.designation,
         "address": contact.address,
-        "subject": "",
-        "source": "Outlook",
-        "source_message_id": "",
+        "location": contact.location,
+        "subject": contact.subject,
+        "email_date": contact.email_date,
+        "source": contact.source,
+        "source_message_id": contact.source_message_id,
         "confidence": int(contact.extraction_confidence or 0),
         "status": contact.status,
+        "name_source": contact.name_source,
+        "name_confidence": float(contact.name_confidence or 0.0),
+        "name_evidence": contact.name_evidence,
+        "email_source": contact.email_source,
+        "email_confidence": float(contact.email_confidence or 0.0),
+        "email_evidence": contact.email_evidence,
+        "organisation_source": contact.organisation_source,
+        "organisation_confidence": float(contact.organisation_confidence or 0.0),
+        "organisation_evidence": contact.organisation_evidence,
+        "mobile_source": contact.mobile_source,
+        "mobile_confidence": float(contact.mobile_confidence or 0.0),
+        "mobile_evidence": contact.mobile_evidence,
+        "designation_source": contact.designation_source,
+        "designation_confidence": float(contact.designation_confidence or 0.0),
+        "designation_evidence": contact.designation_evidence,
+        "address_source": contact.address_source,
+        "address_confidence": float(contact.address_confidence or 0.0),
+        "address_evidence": contact.address_evidence,
+        "review_status": contact.review_status,
+        "reviewed_at": contact.reviewed_at.isoformat() if contact.reviewed_at else "",
+        "reviewed_by": contact.reviewed_by,
+        "correction_notes": contact.correction_notes,
+        "internet_message_id": contact.internet_message_id,
+        "sender_email": contact.sender_email,
+        "sender_name": contact.sender_name,
+        "sender_domain": contact.sender_domain,
         "created_at": contact.created_at.isoformat() if contact.created_at else "",
     }
 
@@ -380,6 +490,7 @@ def _contacts_query(
     *,
     sender: str = "",
     organisation: str = "",
+    source: str = "",
     status: str = "",
     search: str = "",
     sort_by: str = "created_at",
@@ -390,8 +501,10 @@ def _contacts_query(
     query = select(ExtractedContact).where(ExtractedContact.mailbox_id == mailbox.id)
     if organisation:
         query = query.where(ExtractedContact.organisation_name.ilike(f"%{organisation}%"))
+    if source:
+        query = query.where(ExtractedContact.source == source)
     if status:
-        query = query.where(ExtractedContact.status == status)
+        query = query.where(or_(ExtractedContact.status == status, ExtractedContact.review_status == status))
     if sender:
         query = query.where(ExtractedContact.email_address.ilike(f"%{sender}%"))
     if search:
@@ -429,12 +542,15 @@ def list_customers_page(
     page_size: int = 50,
     sender: str = "",
     organisation: str = "",
+    source: str = "",
     status: str = "",
     search: str = "",
+    received_from: datetime | None = None,
+    received_to: datetime | None = None,
     sort_by: str = "created_at",
     sort_dir: str = "desc",
 ) -> dict[str, Any]:
-    """Return a database-paginated customer page."""
+    """Return a UI-safe database-paginated customer page."""
     page_size = min(100, max(1, int(page_size or 50)))
     page = max(1, int(page or 1))
     with db_session() as session:
@@ -443,6 +559,7 @@ def list_customers_page(
             user_id,
             sender=sender,
             organisation=organisation,
+            source=source,
             status=status,
             search=search,
             sort_by=sort_by,
@@ -459,30 +576,53 @@ def iter_customers(
     chunk_size: int = 1000,
     limit: int | None = None,
 ) -> Iterable[list[dict[str, Any]]]:
-    """Yield customer rows in chunks for large exports."""
-    offset = 0
+    """Yield customer rows in chunks using keyset pagination by contact id."""
     emitted = 0
+    last_id = 0
+    chunk_size = max(1, int(chunk_size or 1000))
     while True:
         page_size = min(chunk_size, (limit - emitted) if limit else chunk_size)
         if page_size <= 0:
             return
-        page = offset // chunk_size + 1
-        data = list_customers_page(user_id, page=page, page_size=page_size)
-        rows = data["rows"]
+        with db_session() as session:
+            user_external_id = user_id or config.DEFAULT_USER_ID
+            mailbox = ensure_mailbox(session, user_external_id)
+            contacts = session.scalars(
+                select(ExtractedContact)
+                .where(ExtractedContact.mailbox_id == mailbox.id, ExtractedContact.id > last_id)
+                .order_by(asc(ExtractedContact.id))
+                .limit(page_size)
+            ).all()
+            rows = [_contact_row(row, user_external_id) for row in contacts]
         if not rows:
             return
         yield rows
         emitted += len(rows)
-        offset += len(rows)
+        last_id = int(rows[-1]["id"])
         if len(rows) < page_size:
             return
 
 
-def list_outlook_message_rows(user_id: str) -> list[dict[str, Any]]:
-    """Return cached Outlook message rows for a user."""
+def list_outlook_message_rows(
+    user_id: str,
+    *,
+    page: int = 1,
+    page_size: int = 100,
+    statuses: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Return a server-side paginated page of cached Outlook message rows."""
+    page = max(1, int(page or 1))
+    page_size = min(100, max(1, int(page_size or 100)))
     with db_session() as session:
         mailbox = ensure_mailbox(session, user_id)
-        rows = session.scalars(select(Email).where(Email.mailbox_id == mailbox.id).order_by(desc(Email.received_datetime))).all()
+        query = select(Email).where(Email.mailbox_id == mailbox.id)
+        if statuses:
+            query = query.where(Email.extraction_status.in_(statuses))
+        rows = session.scalars(
+            query.order_by(desc(Email.received_datetime), desc(Email.id))
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        ).all()
     return [
         {
             "message_id": row.graph_message_id,
@@ -501,56 +641,89 @@ def list_outlook_message_rows(user_id: str) -> list[dict[str, Any]]:
 
 def update_customer_review(record_id: int, fields: dict[str, Any], reviewed_by: str = "", notes: str = "") -> None:
     """Apply reviewed corrections while recording every changed field."""
-    with get_connection() as connection:
-        row = connection.execute("SELECT * FROM customers WHERE id = ?", (int(record_id),)).fetchone()
-        if row is None:
+    allowed_fields = {
+        "contact_name": ("person_name", "name_source", "name_confidence"),
+        "email": ("email_address", "email_source", "email_confidence"),
+        "organisation": ("organisation_name", "organisation_source", "organisation_confidence"),
+        "mobile": ("mobile_phone", "mobile_source", "mobile_confidence"),
+        "designation": ("designation", "designation_source", "designation_confidence"),
+        "address": ("address", "address_source", "address_confidence"),
+        "subject": ("subject", None, None),
+    }
+    with db_session() as session:
+        contact = session.get(ExtractedContact, int(record_id))
+        if contact is None:
             raise ValueError("Customer record not found.")
-        now = utc_now()
-        updates: dict[str, Any] = {}
+        now = _utc_now()
         for field, new_value in fields.items():
-            if field not in {"contact_name", "email", "organisation", "mobile", "designation", "address", "subject"}:
+            if field not in allowed_fields:
                 continue
-            old_value = str(row[field] or "")
+            attr, source_attr, confidence_attr = allowed_fields[field]
+            old_value = str(getattr(contact, attr) or "")
             new_value = str(new_value or "").strip()
             if old_value == new_value:
                 continue
-            source_field = {"contact_name": "name_source", "email": "email_source", "organisation": "organisation_source", "mobile": "mobile_source", "designation": "designation_source", "address": "address_source"}.get(field)
-            old_source = str(row[source_field] or "") if source_field else ""
-            if source_field:
-                updates[source_field] = "manual_review"
-                updates[source_field.replace("_source", "_confidence")] = 1.0
-            updates[field] = new_value
+            old_source = str(getattr(contact, source_attr) or "") if source_attr else ""
+            setattr(contact, attr, new_value)
             if field == "email":
-                updates["normalized_email"] = normalize_email(new_value)
+                contact.normalized_email = normalize_email(new_value)
             elif field == "mobile":
-                updates["normalized_mobile"] = normalize_mobile(new_value)
-            connection.execute("INSERT INTO review_audit (record_id, field_name, old_value, new_value, old_source, new_source, reviewed_at, reviewed_by, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (record_id, field, old_value, new_value, old_source, "manual_review", now, reviewed_by, notes))
-        updates.update({"review_status": fields.get("review_status", "Approved"), "reviewed_at": now, "reviewed_by": reviewed_by, "correction_notes": notes})
-        assignments = ", ".join(f"{key} = ?" for key in updates)
-        connection.execute(f"UPDATE customers SET {assignments} WHERE id = ?", (*updates.values(), int(record_id)))
+                contact.normalized_phone = normalize_mobile(new_value)
+            if source_attr:
+                setattr(contact, source_attr, "manual_review")
+            if confidence_attr:
+                setattr(contact, confidence_attr, 1.0)
+            session.add(
+                ReviewAudit(
+                    record_id=contact.id,
+                    field_name=field,
+                    old_value=old_value,
+                    new_value=new_value,
+                    old_source=old_source,
+                    new_source="manual_review",
+                    reviewed_at=now,
+                    reviewed_by=reviewed_by,
+                    notes=notes,
+                )
+            )
+        contact.review_status = str(fields.get("review_status") or "Approved")
+        contact.reviewed_at = now
+        contact.reviewed_by = reviewed_by
+        contact.correction_notes = notes
 
 
 def list_review_audit(record_id: int | None = None) -> list[dict[str, Any]]:
-    query = "SELECT * FROM review_audit"
-    params: tuple[Any, ...] = ()
-    if record_id is not None:
-        query += " WHERE record_id = ?"
-        params = (int(record_id),)
-    query += " ORDER BY reviewed_at DESC, id DESC"
-    with get_connection() as connection:
-        return [dict(row) for row in connection.execute(query, params).fetchall()]
+    """Return append-only review audit rows."""
+    with db_session() as session:
+        query = select(ReviewAudit)
+        if record_id is not None:
+            query = query.where(ReviewAudit.record_id == int(record_id))
+        rows = session.scalars(query.order_by(desc(ReviewAudit.reviewed_at), desc(ReviewAudit.id))).all()
+    return [
+        {
+            "id": int(row.id),
+            "record_id": int(row.record_id),
+            "field_name": row.field_name,
+            "old_value": row.old_value,
+            "new_value": row.new_value,
+            "old_source": row.old_source,
+            "new_source": row.new_source,
+            "reviewed_at": row.reviewed_at.isoformat() if row.reviewed_at else "",
+            "reviewed_by": row.reviewed_by,
+            "notes": row.notes,
+        }
+        for row in rows
+    ]
 
 
-def list_pending_outlook_messages(user_id: str) -> list[dict[str, Any]]:
+def list_pending_outlook_messages(user_id: str, *, page_size: int = 100) -> list[dict[str, Any]]:
     """Return cached messages that still need extraction after a restart."""
-    with get_connection() as connection:
-        rows = connection.execute(
-            """SELECT * FROM outlook_messages
-            WHERE user_id = ? AND processing_status IN ('Pending', 'Processing', 'Failed')
-            ORDER BY received_datetime ASC""",
-            (user_id,),
-        ).fetchall()
-    return [dict(row) for row in rows]
+    return list_outlook_message_rows(
+        user_id,
+        page=1,
+        page_size=page_size,
+        statuses=["Pending", "Processing", "Failed", "Retryable"],
+    )
 
 
 def customer_duplicate_exists(user_id: str, normalized_email: str, normalized_mobile: str) -> bool:
@@ -666,3 +839,64 @@ def set_sync_state(
         state.processed_records = int(processed_records or 0)
         if successful:
             state.last_successful_sync_at = _utc_now()
+
+
+def create_sync_job(user_id: str, *, backend: str) -> dict[str, Any]:
+    """Create one sync job unless an active mailbox job already exists."""
+    with db_session() as session:
+        mailbox = ensure_mailbox(session, user_id)
+        active = session.scalar(
+            select(ProcessingJob).where(
+                ProcessingJob.mailbox_id == mailbox.id,
+                ProcessingJob.job_type == "email_sync",
+                ProcessingJob.status.in_(["Queued", "Running"]),
+            )
+        )
+        if active is not None:
+            return {"id": int(active.id), "status": active.status, "existing": True}
+        job = ProcessingJob(
+            job_type="email_sync",
+            status="Queued",
+            mailbox_id=mailbox.id,
+            payload_json=json.dumps({"user_id": user_id, "backend": backend}),
+        )
+        session.add(job)
+        session.flush()
+        return {"id": int(job.id), "status": job.status, "existing": False}
+
+
+def update_job_status(job_id: int, status: str, *, error_message: str = "", attempts: int | None = None) -> None:
+    """Update persisted processing job status."""
+    with db_session() as session:
+        job = session.get(ProcessingJob, int(job_id))
+        if job is None:
+            raise ValueError("Processing job not found.")
+        job.status = status
+        job.error_message = str(error_message or "")[:1000]
+        if attempts is not None:
+            job.attempts = int(attempts)
+        if status == "Running" and job.started_at is None:
+            job.started_at = _utc_now()
+        if status in {"Completed", "Failed"}:
+            job.completed_at = _utc_now()
+
+
+def get_latest_sync_job(user_id: str) -> dict[str, Any] | None:
+    """Return the latest sync job for UI status display."""
+    with db_session() as session:
+        mailbox = ensure_mailbox(session, user_id)
+        job = session.scalar(
+            select(ProcessingJob)
+            .where(ProcessingJob.mailbox_id == mailbox.id, ProcessingJob.job_type == "email_sync")
+            .order_by(desc(ProcessingJob.created_at), desc(ProcessingJob.id))
+        )
+        if job is None:
+            return None
+        return {
+            "id": int(job.id),
+            "status": job.status,
+            "error_message": job.error_message,
+            "attempts": int(job.attempts or 0),
+            "created_at": job.created_at.isoformat() if job.created_at else "",
+            "updated_at": job.updated_at.isoformat() if job.updated_at else "",
+        }

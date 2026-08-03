@@ -26,3 +26,8 @@ test_customer_data_*.db
 test_customer_data_*.db-journal
 .pytest_cache/
 .compile_cache/
+.pytest-tmp/
+.pytest-tmp*/
+tmp_pytest_run/
+pytest-of-hp/
+../.pytest-tmp/
