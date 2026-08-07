@@ -308,7 +308,7 @@ def _graph_get_with_token(url: str, token: str, retry_on_unauthorized: bool = Tr
         raise RuntimeError("Microsoft Graph request was not sent because the access token is expired.")
     response = _send_graph_get_with_retries(url, headers)
     LOGGER.info("Microsoft Graph response status=%s url=%s", response.status_code, _safe_graph_url(url))
-    LOGGER.info("Microsoft Graph response body=%s", _safe_response_text(response))
+    # Successful mail responses contain customer content; never write them to logs.
     graph_error = _graph_error_details(response)
     authenticate_header = _safe_authenticate_header(response)
     diagnostics.update(_graph_response_diagnostics(response, graph_error, authenticate_header))
@@ -511,7 +511,7 @@ def _graph_response_diagnostics(
         "Graph Error Code": graph_error.get("code", ""),
         "Graph Error Message": graph_error.get("message", ""),
         "Response Headers": _safe_response_headers(response),
-        "Response Body": _safe_response_text(response),
+        "Response Body": _safe_response_text(response) if int(getattr(response, "status_code", 0) or 0) >= 400 else "",
     }
 
 

@@ -49,31 +49,20 @@ def get_customer_page(
     )
 
 
-def iter_customer_export_rows(user_id: str | None = None, *, chunk_size: int = 1000, limit: int | None = None):
+def iter_customer_export_rows(
+    user_id: str | None = None, *, chunk_size: int = 1000, limit: int | None = None,
+    source: str = "", status: str = "", search: str = "",
+):
     """Yield export rows in database chunks."""
-    for rows in database.iter_customers(user_id, chunk_size=chunk_size, limit=limit):
+    for rows in database.iter_customers(
+        user_id, chunk_size=chunk_size, limit=limit, source=source, status=status, search=search
+    ):
         yield to_export_rows(rows)
 
 
 def to_export_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Convert database rows into the existing Excel export schema."""
-    return [
-        {
-            "contact_person_name": row.get("contact_name", ""),
-            "organisation_name": row.get("organisation", ""),
-            "email_id": row.get("email", ""),
-            "mobile_number": row.get("mobile", ""),
-            "normalized_phone": row.get("normalized_mobile", ""),
-            "designation": row.get("designation", ""),
-            "address": row.get("address", ""),
-            "subject": row.get("subject", ""),
-            "input_source": row.get("source", ""),
-            "extraction_confidence": row.get("confidence", ""),
-            "duplicate_status": row.get("status", ""),
-            "confidence_score": 100 if row.get("status") == "Duplicate" else 0,
-        }
-        for row in rows
-    ]
+    """Convert database rows into the single business export schema."""
+    return [to_business_output(row) for row in rows]
 
 
 def to_business_output(row: dict[str, Any]) -> dict[str, Any]:

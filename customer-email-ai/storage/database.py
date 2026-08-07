@@ -425,7 +425,9 @@ def _merge_contact(existing: ExtractedContact, incoming: CustomerRecord) -> None
         "normalized_phone": incoming.normalized_mobile,
         "designation": incoming.designation,
         "address": incoming.address,
+        "location": incoming.location,
         "subject": incoming.subject,
+        "email_date": incoming.email_date,
         "source_message_id": incoming.source_message_id,
         "sender_email": incoming.sender_email,
         "sender_name": incoming.sender_name,
@@ -575,6 +577,9 @@ def iter_customers(
     *,
     chunk_size: int = 1000,
     limit: int | None = None,
+    source: str = "",
+    status: str = "",
+    search: str = "",
 ) -> Iterable[list[dict[str, Any]]]:
     """Yield customer rows in chunks using keyset pagination by contact id."""
     emitted = 0
@@ -586,10 +591,12 @@ def iter_customers(
             return
         with db_session() as session:
             user_external_id = user_id or config.DEFAULT_USER_ID
-            mailbox = ensure_mailbox(session, user_external_id)
+            query, user_external_id = _contacts_query(
+                session, user_external_id, source=source, status=status, search=search
+            )
             contacts = session.scalars(
-                select(ExtractedContact)
-                .where(ExtractedContact.mailbox_id == mailbox.id, ExtractedContact.id > last_id)
+                query.where(ExtractedContact.id > last_id)
+                .order_by(None)
                 .order_by(asc(ExtractedContact.id))
                 .limit(page_size)
             ).all()

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from io import StringIO
-
 import pandas as pd
 import streamlit as st
 
@@ -11,7 +9,7 @@ IMPORT_ERROR: Exception | None = None
 try:
     from excel_exporter import EXCEL_FILE_NAME
     from services.customer_service import get_customer_page, to_business_output, BUSINESS_COLUMNS
-    from services.export_service import cleanup_export, create_large_excel_export
+    from services.export_service import cleanup_export, create_large_csv_export, create_large_excel_export
     from storage import database
 except Exception as exc:  # pragma: no cover
     IMPORT_ERROR = exc
@@ -87,15 +85,24 @@ def render(user_id: str) -> None:
                     st.success("Review saved with audit history.")
                     st.rerun()
 
-    csv_buffer = StringIO()
-    display.to_csv(csv_buffer, index=False)
     export_path = None
+    csv_path = None
     try:
-        export_path = create_large_excel_export(user_id)
+        export_path = create_large_excel_export(
+            user_id, source="" if source_filter == "All" else source_filter,
+            status="" if status_filter == "All" else status_filter, search=search,
+        )
+        csv_path = create_large_csv_export(
+            user_id, source="" if source_filter == "All" else source_filter,
+            status="" if status_filter == "All" else status_filter, search=search,
+        )
         excel_data = export_path.read_bytes()
+        csv_data = csv_path.read_bytes()
     finally:
         if export_path is not None:
             cleanup_export(export_path)
+        if csv_path is not None:
+            cleanup_export(csv_path)
     download_cols = st.columns(2)
     with download_cols[0]:
         st.download_button(
@@ -108,7 +115,7 @@ def render(user_id: str) -> None:
     with download_cols[1]:
         st.download_button(
             "Download CSV",
-            data=csv_buffer.getvalue(),
+            data=csv_data,
             file_name="customer_registry.csv",
             mime="text/csv",
             use_container_width=True,

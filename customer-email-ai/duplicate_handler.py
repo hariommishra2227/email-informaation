@@ -19,6 +19,9 @@ def customer_record_to_contact(customer: CustomerRecord) -> dict[str, str]:
         "company": customer.organisation,
         "designation": customer.designation,
         "address": customer.address,
+        "location": customer.location,
+        "subject": customer.subject,
+        "email_date": customer.email_date,
         "city": city,
         "country": country,
         "source_message_id": customer.source_message_id,
@@ -33,4 +36,3 @@ def _split_city_country(address: str) -> tuple[str, str]:
     if len(parts) == 1:
         return parts[0], ""
     return parts[-2], parts[-1]
-

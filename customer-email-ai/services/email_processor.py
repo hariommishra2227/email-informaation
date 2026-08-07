@@ -31,6 +31,20 @@ def _normalize_graph_email(value: str) -> str:
     return value if _looks_like_valid_email(value) else ""
 
 
+def _extract_reliable_location(text: str, extracted: dict[str, Any]) -> str:
+    """Return only an explicitly labelled location/city value."""
+    provided = str(extracted.get("location") or extracted.get("city") or "").strip()
+    if provided:
+        return provided
+    for line in str(text or "").splitlines():
+        match = re.match(r"(?i)^\s*(?:location|city)\s*:\s*(.{2,120})\s*$", line)
+        if match:
+            value = match.group(1).strip(" ,;.-")
+            if value and "@" not in value and not re.search(r"https?://", value, re.I):
+                return value
+    return ""
+
+
 def clean_html_to_text(body: str) -> str:
     """Convert HTML-only or mixed email body content into plain text."""
     if not body:
@@ -114,7 +128,7 @@ def build_customer_record(
         email = sender_email.strip()
 
     contact_name = sender_name.strip()
-    if not contact_name and not sender_email:
+    if not contact_name:
         contact_name = str(extracted.get("contact_person_name") or extracted.get("name") or "").strip()
 
     customer_values = {
@@ -124,6 +138,7 @@ def build_customer_record(
         "mobile": str(extracted.get("mobile_number") or extracted.get("phone") or "").strip(),
         "designation": str(extracted.get("designation") or "").strip(),
         "address": str(extracted.get("address") or "").strip(),
+        "location": _extract_reliable_location(cleaned_text, extracted),
         "subject": subject or str(extracted.get("subject") or "").strip(),
     }
     if config.is_internal_company(customer_values["organisation"]):
@@ -148,6 +163,7 @@ def build_customer_record(
         normalized_mobile=normalized_mobile,
         designation=customer_values["designation"],
         address=customer_values["address"],
+        location=customer_values["location"],
         subject=customer_values["subject"],
         email_date=_normalize_graph_datetime(received_datetime),
         source=source,
