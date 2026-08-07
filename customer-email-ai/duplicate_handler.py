@@ -15,7 +15,8 @@ def customer_record_to_contact(customer: CustomerRecord) -> dict[str, str]:
     return {
         "name": customer.contact_name,
         "email": customer.normalized_email or customer.email.lower().strip(),
-        "phone": customer.normalized_mobile or normalize_mobile(customer.mobile),
+        "phone": customer.mobile,
+        "normalized_phone": customer.normalized_mobile or normalize_mobile(customer.mobile),
         "company": customer.organisation,
         "designation": customer.designation,
         "address": customer.address,

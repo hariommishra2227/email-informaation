@@ -83,8 +83,9 @@ def list_inbox_messages(
     received_after: str | None = None,
     received_before: str | None = None,
     folder: str = "Inbox",
+    skip_internal: bool = True,
 ) -> list[OutlookMessage]:
-    """Return Outlook inbox messages without marking them read."""
+    """Return bounded messages from the selected Outlook folder."""
     limit = max(1, int(limit or 50))
     if config.is_mock_mode():
         messages = list_mock_messages(user_id, limit=limit)
@@ -92,15 +93,18 @@ def list_inbox_messages(
             messages = [message for message in messages if message.received_datetime >= received_after]
         if received_before:
             messages = [message for message in messages if message.received_datetime < received_before]
+        if skip_internal:
+            messages = [message for message in messages if not config.is_internal_sender(message.sender_email)]
         return messages
 
     token = graph_auth.get_valid_access_token()
-    LOGGER.info("Calling Microsoft Graph inbox endpoint with limit=%s.", limit)
+    LOGGER.info("Calling Microsoft Graph folder endpoint folder=%s limit=%s.", folder, limit)
     folder_id = {"Inbox": "inbox", "Sent Items": "sentitems", "Archive": "archive", "Drafts": "drafts"}.get(folder, "inbox")
+    page_size = min(999, limit)
     next_url = (
-        f"{GRAPH_BASE_URL}/me/mailFolders/inbox/messages"
+        f"{GRAPH_BASE_URL}/me/mailFolders/{folder_id}/messages"
         "?$select=id,internetMessageId,subject,from,toRecipients,receivedDateTime,bodyPreview,body,isRead,hasAttachments,webLink"
-        "&$orderby=receivedDateTime desc&$top=50"
+        f"&$orderby=receivedDateTime desc&$top={page_size}"
     )
     if received_after:
         filter_expression = f"receivedDateTime ge {received_after}"
@@ -119,7 +123,7 @@ def list_inbox_messages(
                 continue
             sender = (item.get("from") or {}).get("emailAddress", {}) or {}
             receiver_name = _receiver_names_from_graph_item(item)
-            if config.is_internal_sender(str(sender.get("address") or "")):
+            if skip_internal and config.is_internal_sender(str(sender.get("address") or "")):
                 LOGGER.info("Skipping internal Outlook message before body extraction message_id=%s.", message_id)
                 continue
             body_info = item.get("body") or {}

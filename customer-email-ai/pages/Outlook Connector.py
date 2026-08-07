@@ -85,15 +85,21 @@ def render(user_id: str) -> None:
     if sync_clicked:
         _sync_mailbox(user_id)
 
+    cache_signature = _message_cache_signature(folder, received_after, received_before, limit, skip_internal)
     cached_messages = st.session_state.get("outlook_messages_cache", [])
-    if can_load_inbox and (refresh_clicked or not cached_messages):
+    cached_signature = st.session_state.get("outlook_messages_cache_signature")
+    if can_load_inbox and (refresh_clicked or not cached_messages or cached_signature != cache_signature):
         try:
-            messages = graph_client.list_inbox_messages(user_id, limit=int(limit))
+            messages = graph_client.list_inbox_messages(
+                user_id, limit=int(limit), received_after=received_after,
+                received_before=received_before, folder=folder, skip_internal=skip_internal,
+            )
             st.session_state["outlook_messages_cache"] = messages
+            st.session_state["outlook_messages_cache_signature"] = cache_signature
         except Exception as exc:
             LOGGER.exception("Outlook inbox refresh failed.")
             st.error(_friendly_exception_message(exc))
-            messages = st.session_state.get("outlook_messages_cache", [])[: int(limit)]
+            messages = []
     else:
         messages = cached_messages[: int(limit)]
 
@@ -104,10 +110,9 @@ def render(user_id: str) -> None:
             LOGGER.exception("Could not cache Outlook message metadata.")
 
     try:
-        status_rows = {
-            row["message_id"]: row["processing_status"]
-            for row in database.list_outlook_message_rows(user_id)
-        }
+        status_rows = database.message_statuses_for_ids(
+            user_id, [message.message_id for message in messages]
+        )
     except Exception as exc:
         LOGGER.exception("Could not read Outlook message status rows.")
         st.error(_safe_render_exception_message(exc, "Outlook message status"))
@@ -122,12 +127,12 @@ def render(user_id: str) -> None:
         return
 
     if import_selected_clicked:
-        _import_messages(user_id, messages, selected_ids)
+        _import_messages(user_id, filtered, selected_ids)
     if import_unread_clicked:
-        _import_messages(user_id, messages, [message.message_id for message in messages if not message.is_read])
+        _import_messages(user_id, filtered, _unread_loaded_message_ids(filtered))
 
     _render_import_result()
-    _render_sync_status()
+    _render_sync_status(user_id)
     st.write("")
     try:
         _render_customer_preview(user_id)
@@ -207,6 +212,7 @@ def _render_connection_panel() -> bool:
             graph_auth.logout_user()
             initialize_outlook_session_state()
             st.session_state["outlook_messages_cache"] = []
+            st.session_state["outlook_messages_cache_signature"] = None
             st.session_state["selected_outlook_messages"] = []
             st.session_state["outlook_selected_messages"] = []
             st.rerun()
@@ -336,11 +342,25 @@ def _render_quick_actions(user_id: str) -> tuple[bool, bool, bool, bool]:
 def _ensure_refresh_session_defaults() -> None:
     """Create refresh-related Outlook defaults without overwriting auth state."""
     st.session_state.setdefault("outlook_messages_cache", [])
+    st.session_state.setdefault("outlook_messages_cache_signature", None)
     st.session_state.setdefault("outlook_selected_messages", [])
     st.session_state.setdefault("outlook_access_token", None)
     st.session_state.setdefault("outlook_token_expiry", None)
     st.session_state.setdefault("outlook_authenticated_cache_owner", None)
     st.session_state.setdefault("outlook_home_account_id", None)
+
+
+def _message_cache_signature(
+    folder: str, received_after: str | None, received_before: str | None,
+    limit: int, skip_internal: bool,
+) -> tuple[str, str, str, int, bool]:
+    """Identify the server-side controls used to populate the current cache."""
+    return folder, received_after or "", received_before or "", int(limit), bool(skip_internal)
+
+
+def _unread_loaded_message_ids(messages: list) -> list[str]:
+    """Return unread IDs only from the currently loaded/filtered messages."""
+    return unique_message_ids([message.message_id for message in messages if not message.is_read])
 
 
 def _render_enterprise_sync(user_id: str, received_after: str | None, received_before: str | None, limit: int = 100, folder: str = "Inbox") -> None:
@@ -422,22 +442,36 @@ def _render_filters() -> tuple[str, str, tuple[date, date] | list, int, str, boo
     with controls[3]:
         skip_internal = st.checkbox("Skip Internal Emails", value=True)
     search_text = st.text_input("Search sender or subject", "")
-    date_range: tuple[date, date] | list = []
-    received_after = None
-    received_before = None
+    custom_dates: tuple[date, date] | tuple = ()
     if date_filter == "Custom Date Range":
-        custom_dates = st.date_input("Email date range", value=())
-        if isinstance(custom_dates, tuple) and len(custom_dates) == 2:
-            start_date, end_date = custom_dates
-            if start_date <= end_date:
-                received_after = datetime.combine(start_date, datetime.min.time(), tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
-                received_before = datetime.combine(end_date + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+        selected_dates = st.date_input("Email date range", value=())
+        if isinstance(selected_dates, tuple) and len(selected_dates) == 2:
+            custom_dates = selected_dates
+    date_range, received_after, received_before = _received_date_bounds(date_filter, custom_dates)
+    return folder, date_filter, date_range, limit, search_text, skip_internal, received_after, received_before
+
+
+def _received_date_bounds(
+    date_filter: str,
+    custom_dates: tuple[date, date] | tuple = (),
+    current_date: date | None = None,
+) -> tuple[tuple[date, date] | list, str | None, str | None]:
+    """Return inclusive UI dates and exclusive-upper-bound Graph timestamps."""
+    today = current_date or date.today()
+    date_range: tuple[date, date] | list = []
+    if date_filter == "Custom Date Range":
+        if len(custom_dates) != 2 or custom_dates[0] > custom_dates[1]:
+            return date_range, None, None
+        start_date, end_date = custom_dates
+        date_range = (start_date, end_date)
     elif date_filter in {"Last 7 Days", "Last 30 Days", "Last 90 Days"}:
         days = int(date_filter.split()[1])
-        start_date = date.today() - timedelta(days=days - 1)
-        received_after = datetime.combine(start_date, datetime.min.time(), tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
-        received_before = datetime.combine(date.today() + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
-    return folder, date_filter, date_range, limit, search_text, skip_internal, received_after, received_before
+        start_date, end_date = today - timedelta(days=days - 1), today
+    else:
+        return date_range, None, None
+    received_after = datetime.combine(start_date, datetime.min.time(), tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+    received_before = datetime.combine(end_date + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+    return date_range, received_after, received_before
 
 
 def _filter_messages(messages: list, search_text: str, date_filter: str, date_range: tuple[date, date] | list) -> list:
@@ -475,9 +509,11 @@ def _render_inbox_list(messages: list, status_rows: dict[str, str]) -> list[str]
     with action_cols[1]:
         clear_clicked = st.button("Clear Selection", key="clear_outlook_selection", use_container_width=True)
     if select_all_clicked:
+        st.session_state.pop("outlook_message_selection_table", None)
         selected_message_ids = select_all_loaded_message_ids(messages)
         st.success(f"{len(selected_message_ids)} visible emails selected.")
     elif clear_clicked:
+        st.session_state.pop("outlook_message_selection_table", None)
         selected_message_ids = clear_selected_message_ids()
         st.success("Selection cleared.")
     else:
@@ -638,17 +674,16 @@ def _sync_mailbox(user_id: str) -> None:
         st.error(_safe_render_exception_message(exc, "Mailbox sync"))
 
 
-def _render_sync_status() -> None:
+def _render_sync_status(user_id: str) -> None:
     """Render enterprise sync and database statistics."""
     try:
-        stats = EmailSyncRepository().stats()
+        stats, latest_job = _sync_status_data(user_id)
     except Exception as exc:
         LOGGER.exception("Could not read enterprise database statistics.")
         st.error(_safe_render_exception_message(exc, "Database statistics"))
         return
 
     summary = st.session_state.get("outlook_sync_summary")
-    latest_job = database.get_latest_sync_job(config.DEFAULT_USER_ID)
     st.subheader("Database Statistics")
     stat_cols = st.columns(3)
     with stat_cols[0]:
@@ -667,6 +702,11 @@ def _render_sync_status() -> None:
     st.info(f"Latest sync request: {summary.get('status', 'unknown')} job #{summary.get('job_id', '')}")
     if latest_job:
         st.caption(f"Persisted job status: {latest_job['status']}")
+
+
+def _sync_status_data(user_id: str) -> tuple[dict, dict | None]:
+    """Load sync statistics and the latest job for the current mailbox only."""
+    return EmailSyncRepository().stats(user_id), database.get_latest_sync_job(user_id)
 
 
 def _render_import_result() -> None:

@@ -76,6 +76,10 @@ def initialize_database(db_path: Path | str | None = None) -> None:
         _configure_sqlite_url(db_path)
     elif str(DATABASE_PATH) == ":memory:":
         _configure_sqlite_url(DATABASE_PATH)
+    elif config.APP_ENV == "test":
+        expected_url = f"sqlite+pysqlite:///{DATABASE_PATH}"
+        if config.DATABASE_URL != expected_url:
+            _configure_sqlite_url(DATABASE_PATH)
     elif not config.DATABASE_URL:
         _configure_sqlite_url(DATABASE_PATH)
     create_all_for_local_tests()
@@ -644,6 +648,25 @@ def list_outlook_message_rows(
         }
         for row in rows
     ]
+
+
+def message_statuses_for_ids(user_id: str, message_ids: list[str]) -> dict[str, str]:
+    """Return statuses only for loaded message IDs using bounded SQL batches."""
+    unique_ids = list(dict.fromkeys(str(value) for value in message_ids if str(value)))
+    if not unique_ids:
+        return {}
+    statuses: dict[str, str] = {}
+    with db_session() as session:
+        mailbox = ensure_mailbox(session, user_id)
+        for start in range(0, len(unique_ids), 500):
+            rows = session.execute(
+                select(Email.graph_message_id, Email.extraction_status).where(
+                    Email.mailbox_id == mailbox.id,
+                    Email.graph_message_id.in_(unique_ids[start:start + 500]),
+                )
+            ).all()
+            statuses.update({str(message_id): str(status) for message_id, status in rows})
+    return statuses
 
 
 def update_customer_review(record_id: int, fields: dict[str, Any], reviewed_by: str = "", notes: str = "") -> None:

@@ -59,6 +59,7 @@ def test_deselect_all_clears_current_selections_only() -> None:
     selected = PAGE._update_selected_outlook_messages([_message("one"), _message("two")], False)
 
     assert selected == []
+    assert PAGE.st.session_state["outlook_selected_messages"] == []
 
 
 def test_individual_selection_remains_when_select_all_is_disabled() -> None:

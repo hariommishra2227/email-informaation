@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from duplicate_detector import normalize_email
+from duplicate_detector import normalize_email, normalize_mobile
 from models import CustomerRecord
 from storage import database
 
@@ -24,7 +24,9 @@ class EmailSyncRepository:
     """PostgreSQL-ready repository for processed messages, contacts, and sync state."""
 
     def __init__(self) -> None:
-        database.initialize_database()
+        # Schema initialization belongs to application/test setup. Re-running it
+        # here can replace an active in-memory test database during an upsert.
+        pass
 
     def has_processed_email(self, message_id: str, user_id: str = "") -> bool:
         """Return whether a Microsoft message id was already processed."""
@@ -88,7 +90,7 @@ class EmailSyncRepository:
             email=str(contact.get("email", "")),
             normalized_email=normalized_email,
             mobile=str(contact.get("phone", "")),
-            normalized_mobile=str(contact.get("phone", "")),
+            normalized_mobile=str(contact.get("normalized_phone", "")) or normalize_mobile(str(contact.get("phone", ""))),
             designation=str(contact.get("designation", "")),
             address=str(contact.get("address", "")),
             location=str(contact.get("location", "")),
