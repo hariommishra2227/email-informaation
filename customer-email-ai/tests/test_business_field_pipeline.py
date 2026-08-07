@@ -99,3 +99,28 @@ def test_excel_and_csv_have_exact_business_schema(isolated_db: None) -> None:
     finally:
         cleanup_export(excel_path)
         cleanup_export(csv_path)
+
+
+def test_file_database_does_not_reuse_prior_in_memory_state(
+    isolated_db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database.insert_customer(CustomerRecord(user_id="u", email="old@example.com"))
+    monkeypatch.setattr(database, "DATABASE_PATH", tmp_path / "isolated.db")
+    database.initialize_database()
+    assert database.list_customers("u") == []
+
+
+def test_loaded_message_status_lookup_is_not_limited_to_first_100(isolated_db: None) -> None:
+    messages = [
+        OutlookMessage(
+            message_id=f"m-{index}", user_id="u", sender_name="", sender_email=f"p{index}@example.com",
+            subject="", body="", received_datetime=f"2026-08-07T10:{index % 60:02d}:00Z", is_read=False,
+        )
+        for index in range(125)
+    ]
+    for message in messages:
+        database.upsert_outlook_message(message)
+        database.set_message_status("u", message.message_id, "Unique")
+    statuses = database.message_statuses_for_ids("u", [message.message_id for message in messages])
+    assert len(statuses) == 125
+    assert statuses["m-124"] == "Unique"
