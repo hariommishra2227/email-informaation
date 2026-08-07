@@ -57,7 +57,11 @@ def test_large_export_iterates_beyond_ui_page_cap(isolated_db: None, monkeypatch
     finally:
         cleanup_export(path)
 
-    email_column = rows[0].index("Email ID")
+    assert list(rows[0]) == [
+        "Client Name", "Contact Person Name", "Contact Email", "Phone Number",
+        "Full Address", "Location", "Subject", "Email Date",
+    ]
+    email_column = rows[0].index("Contact Email")
     exported_emails = [row[email_column] for row in rows[1:]]
     assert len(exported_emails) == 1001
     assert len(set(exported_emails)) == 1001

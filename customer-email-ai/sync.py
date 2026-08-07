@@ -69,6 +69,10 @@ class OutlookMailboxSyncService:
                     processed_seen += 1
                     try:
                         database.upsert_outlook_message(message)
+                        if config.is_internal_sender(message.sender_email):
+                            database.set_message_status(user_id, message.message_id, "Skipped Internal")
+                            result.skipped_emails += 1
+                            continue
                         if database.message_was_imported(user_id, message.message_id):
                             result.skipped_emails += 1
                             continue
@@ -79,7 +83,9 @@ class OutlookMailboxSyncService:
                             source_message_id=message.message_id,
                             sender_email=message.sender_email,
                             sender_name=message.sender_name,
+                            receiver_name=message.receiver_name,
                             subject=message.subject,
+                            received_datetime=message.received_datetime,
                             engine=extractor,
                         )
                         upsert = self.repository.upsert_contact(customer_record_to_contact(customer), user_id=user_id)

@@ -15,17 +15,14 @@ EXCEL_FILE_NAME = "customer_report.xlsx"
 WORKSHEET_NAME = "Customer Report"
 
 COLUMN_MAPPING = {
-    "contact_person_name": "Customer Name",
-    "email_id": "Email ID",
-    "organisation_name": "Organisation",
-    "mobile_number": "Mobile Number",
-    "input_source": "Source",
-    "designation": "Designation",
-    "address": "Address",
-    "subject": "Subject",
-    "extraction_confidence": "Extraction Confidence",
-    "duplicate_status": "Duplicate Status",
-    "confidence_score": "Confidence Score",
+    "Client Name": "Client Name",
+    "Contact Person Name": "Contact Person Name",
+    "Contact Email": "Contact Email",
+    "Phone Number": "Phone Number",
+    "Full Address": "Full Address",
+    "Location": "Location",
+    "Subject": "Subject",
+    "Email Date": "Email Date",
 }
 
 HEADER_FILL = PatternFill(fill_type="solid", fgColor="D9EAF7")
@@ -38,10 +35,24 @@ def _build_export_rows(customers: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Convert customer dictionaries into Excel-ready rows."""
     rows: list[dict[str, Any]] = []
 
+    aliases = {
+        "Client Name": ("Client Name", "organisation", "organisation_name"),
+        "Contact Person Name": ("Contact Person Name", "contact_name", "contact_person_name"),
+        "Contact Email": ("Contact Email", "email", "email_id"),
+        "Phone Number": ("Phone Number", "mobile", "mobile_number"),
+        "Full Address": ("Full Address", "address"),
+        "Location": ("Location", "location"),
+        "Subject": ("Subject", "subject"),
+        "Email Date": ("Email Date", "email_date"),
+    }
+
     for customer in customers:
         rows.append(
             {
-                column_name: _excel_value(customer.get(source_key, ""))
+                column_name: _excel_value(next(
+                    (customer.get(key) for key in aliases[source_key] if customer.get(key) not in (None, "")),
+                    "",
+                ))
                 for source_key, column_name in COLUMN_MAPPING.items()
             }
         )

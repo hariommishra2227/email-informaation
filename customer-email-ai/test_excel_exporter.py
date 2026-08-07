@@ -50,16 +50,18 @@ def test_export_customers_to_excel() -> None:
 
     worksheet = workbook[WORKSHEET_NAME]
     assert worksheet.max_row == 21
-    assert worksheet.max_column == 11
+    assert worksheet.max_column == 8
     assert worksheet.freeze_panes == "A2"
-    assert worksheet["A1"].value == "Customer Name"
+    assert [cell.value for cell in worksheet[1]] == [
+        "Client Name", "Contact Person Name", "Contact Email", "Phone Number",
+        "Full Address", "Location", "Subject", "Email Date",
+    ]
     assert worksheet["D2"].value == "+91 9876543201"
-    assert worksheet["E1"].value == "Source"
     assert worksheet["A1"].font.bold is True
     assert worksheet["A1"].fill.fgColor.rgb == "00D9EAF7"
     assert worksheet["A2"].fill.fgColor.rgb == "00F7FBFF"
     assert worksheet["A3"].fill.fgColor.rgb == "00FFFFFF"
-    assert worksheet.column_dimensions["A"].width > len("Customer Name")
+    assert worksheet.column_dimensions["A"].width > len("Client Name")
 
 
 def main() -> None:
