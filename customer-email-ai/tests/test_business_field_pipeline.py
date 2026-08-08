@@ -18,7 +18,7 @@ from storage import database
 from sync import OutlookMailboxSyncService
 
 
-HEADERS = ["Client Name", "Contact Person Name", "Contact Email", "Phone Number", "Full Address", "Location", "Subject", "Email Date"]
+HEADERS = ["Customer Name", "Contact Mail", "Location", "Sender"]
 
 
 @pytest.fixture()
@@ -102,8 +102,14 @@ def test_excel_and_csv_have_exact_business_schema(isolated_db: None) -> None:
 
 
 def test_customer_excel_exports_multiple_processed_outlook_records_only(isolated_db: None) -> None:
-    database.insert_customer(CustomerRecord(user_id="u", email="one@example.com", source="Outlook"))
-    database.insert_customer(CustomerRecord(user_id="u", email="two@example.com", source="Outlook"))
+    database.insert_customer(CustomerRecord(
+        user_id="u", email="one@example.com", organisation="One Ltd", location="Pune",
+        sender_name="One Sender", source="Outlook",
+    ))
+    database.insert_customer(CustomerRecord(
+        user_id="u", email="two@example.com", organisation="Two Ltd", location="Mumbai",
+        sender_name="Two Sender", source="Outlook",
+    ))
     database.insert_customer(CustomerRecord(user_id="u", email="manual@example.com", source="Manual"))
 
     excel_path = create_large_excel_export("u", source="Outlook")
@@ -113,7 +119,10 @@ def test_customer_excel_exports_multiple_processed_outlook_records_only(isolated
         cleanup_export(excel_path)
 
     assert rows[0] == tuple(HEADERS)
-    assert [row[2] for row in rows[1:]] == ["one@example.com", "two@example.com"]
+    assert rows[1:] == [
+        ("One Ltd", "one@example.com", "Pune", "One Sender"),
+        ("Two Ltd", "two@example.com", "Mumbai", "Two Sender"),
+    ]
 
 
 def test_file_database_does_not_reuse_prior_in_memory_state(

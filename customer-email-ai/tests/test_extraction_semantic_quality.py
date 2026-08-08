@@ -99,12 +99,11 @@ def test_inbox_preview_columns_never_become_customer_export_columns() -> None:
         "Status": "Unread", "Processing": "Pending", "Attachment": "No", "Message ID": "m1",
     }
     workbook = load_workbook(export_customers_to_excel([raw_inbox_row]), read_only=True)
-    headers = list(next(workbook.active.values))
-    assert headers == [
-        "Client Name", "Contact Person Name", "Contact Email", "Phone Number",
-        "Full Address", "Location", "Subject", "Email Date",
-    ]
-    assert not set(raw_inbox_row) & set(headers)
+    rows = list(workbook.active.values)
+    assert list(rows[0]) == ["Customer Name", "Contact Mail", "Location", "Sender"]
+    assert "Select" not in rows[0]
+    assert False not in rows[1]
+    assert not {"Subject", "Received", "Status", "Processing", "Attachment", "Message ID"} & set(rows[0])
 
 
 def test_outlook_page_labels_inbox_as_preview_and_customer_export() -> None:
@@ -113,5 +112,7 @@ def test_outlook_page_labels_inbox_as_preview_and_customer_export() -> None:
     assert "Preview/raw mailbox data only" in source
     assert "Customer Records" in source
     assert "Download Customer Excel" in source
+    assert "Select All Emails" in source
+    assert "Clear All" in source
     assert "Extract customer emails first to enable Excel download." in source
     assert 'create_large_excel_export(user_id, source="Outlook")' in source

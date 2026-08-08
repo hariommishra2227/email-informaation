@@ -510,9 +510,9 @@ def _render_inbox_list(messages: list, status_rows: dict[str, str]) -> list[str]
 
     action_cols = st.columns(2)
     with action_cols[0]:
-        select_all_clicked = st.button("Select All Loaded Emails", key="select_all_loaded_outlook", use_container_width=True)
+        select_all_clicked = st.button("Select All Emails", key="select_all_loaded_outlook", use_container_width=True)
     with action_cols[1]:
-        clear_clicked = st.button("Clear Selection", key="clear_outlook_selection", use_container_width=True)
+        clear_clicked = st.button("Clear All", key="clear_outlook_selection", use_container_width=True)
     if select_all_clicked:
         st.session_state.pop("outlook_message_selection_table", None)
         selected_message_ids = select_all_loaded_message_ids(messages)

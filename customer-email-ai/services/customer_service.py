@@ -7,7 +7,7 @@ from typing import Any
 from models import CustomerRecord
 from storage import database
 
-BUSINESS_COLUMNS = ("Client Name", "Contact Person Name", "Contact Email", "Phone Number", "Full Address", "Location", "Subject", "Email Date")
+BUSINESS_COLUMNS = ("Customer Name", "Contact Mail", "Location", "Sender")
 
 
 def save_customer(customer: CustomerRecord) -> int:
@@ -68,12 +68,8 @@ def to_export_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def to_business_output(row: dict[str, Any]) -> dict[str, Any]:
     """Convert one database row into the business-facing registry/export shape."""
     return {
-        "Client Name": row.get("organisation", ""),
-        "Contact Person Name": row.get("contact_name", ""),
-        "Contact Email": row.get("email", ""),
-        "Phone Number": row.get("mobile", ""),
-        "Full Address": row.get("address", ""),
+        "Customer Name": row.get("organisation", ""),
+        "Contact Mail": row.get("email", ""),
         "Location": row.get("location", ""),
-        "Subject": row.get("subject", ""),
-        "Email Date": row.get("email_date", ""),
+        "Sender": row.get("sender_name", ""),
     }
