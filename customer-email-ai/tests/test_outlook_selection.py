@@ -49,7 +49,7 @@ def test_select_all_selects_only_loaded_emails() -> None:
 
     selected = PAGE._update_selected_outlook_messages(messages, True)
 
-    assert selected == ["existing", "one", "two"]
+    assert selected == ["one", "two"]
 
 
 def test_deselect_all_clears_current_selections_only() -> None:
@@ -64,12 +64,12 @@ def test_deselect_all_clears_current_selections_only() -> None:
     assert PAGE.st.session_state["outlook_selected_messages"] == []
 
 
-def test_individual_selection_remains_when_select_all_is_disabled() -> None:
+def test_clear_all_removes_every_displayed_selection() -> None:
     PAGE.st.session_state = SessionStateMock(selected_outlook_messages=["one"])
 
     selected = PAGE._update_selected_outlook_messages([_message("one"), _message("two")], False)
 
-    assert selected == ["one"]
+    assert selected == []
 
 
 def test_select_all_supports_1000_loaded_emails() -> None:
@@ -80,6 +80,70 @@ def test_select_all_supports_1000_loaded_emails() -> None:
 
     assert len(selected) == 1000
     assert selected[-1] == "message-999"
+
+
+def test_select_all_checks_all_50_visible_table_rows() -> None:
+    PAGE.st.session_state = SessionStateMock()
+    messages = [_message(f"message-{index}") for index in range(50)]
+
+    selected = PAGE.select_all_loaded_message_ids(messages)
+    rows = PAGE._selection_table_rows(messages, {}, selected)
+
+    assert len(selected) == 50
+    assert all(row["Select"] is True for row in rows)
+    assert PAGE._selected_count_text(selected, messages) == "Selected: 50 of 50"
+
+
+def test_filtered_select_all_selects_only_20_displayed_messages() -> None:
+    PAGE.st.session_state = SessionStateMock(selected_outlook_messages=["not-displayed"])
+    filtered = [_message(f"filtered-{index}") for index in range(20)]
+
+    selected = PAGE.select_all_loaded_message_ids(filtered)
+
+    assert selected == [f"filtered-{index}" for index in range(20)]
+    assert PAGE._selected_count_text(selected, filtered) == "Selected: 20 of 20"
+
+
+def test_manual_deselection_updates_ids_and_visible_rows() -> None:
+    PAGE.st.session_state = SessionStateMock()
+    messages = [_message("one"), _message("two"), _message("three")]
+    PAGE.select_all_loaded_message_ids(messages)
+
+    selected = PAGE._set_selected_message_ids(["one", "three"])
+    rows = PAGE._selection_table_rows(messages, {}, selected)
+
+    assert selected == ["one", "three"]
+    assert [row["Select"] for row in rows] == [True, False, True]
+
+
+def test_rerun_reconciles_stale_ids_and_preserves_visible_selection() -> None:
+    PAGE.st.session_state = SessionStateMock(
+        selected_outlook_messages=["visible", "stale"],
+        outlook_selected_messages=["visible", "stale"],
+        outlook_displayed_message_ids=("old",),
+        outlook_selection_editor_version=2,
+    )
+
+    selected = PAGE.reconcile_displayed_selection([_message("visible"), _message("new")])
+
+    assert selected == ["visible"]
+    assert PAGE.st.session_state["outlook_selected_messages"] == ["visible"]
+    assert PAGE.st.session_state["outlook_displayed_message_ids"] == ("visible", "new")
+    assert PAGE.st.session_state["outlook_selection_editor_version"] == 3
+
+
+def test_ordinary_rerun_keeps_editor_generation_and_selection() -> None:
+    PAGE.st.session_state = SessionStateMock(
+        selected_outlook_messages=["one"],
+        outlook_selected_messages=["one"],
+        outlook_displayed_message_ids=("one", "two"),
+        outlook_selection_editor_version=4,
+    )
+
+    selected = PAGE.reconcile_displayed_selection([_message("one"), _message("two")])
+
+    assert selected == ["one"]
+    assert PAGE.st.session_state["outlook_selection_editor_version"] == 4
 
 
 def test_import_skips_duplicate_message_ids(monkeypatch) -> None:
