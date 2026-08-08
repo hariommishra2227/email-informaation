@@ -141,8 +141,7 @@ def render(user_id: str) -> None:
     st.write("")
     try:
         _render_customer_preview(user_id)
-        st.subheader("Customer Report")
-        _render_excel_export(user_id, label="Export Customer Excel")
+        _render_excel_export(user_id)
     except Exception as exc:
         LOGGER.exception("Outlook customer preview failed to render.")
         st.error(_safe_render_exception_message(exc, "Outlook customer preview"))
@@ -502,7 +501,7 @@ def _filter_messages(messages: list, search_text: str, date_filter: str, date_ra
 
 def _render_inbox_list(messages: list, status_rows: dict[str, str]) -> list[str]:
     """Render selectable inbox rows and return selected message ids."""
-    st.subheader("Inbox Preview — Not Customer Report")
+    st.subheader("Inbox Preview — Select Emails for Extraction")
     if not messages:
         st.info("No emails found for the selected filters.")
         st.session_state["selected_outlook_messages"] = []
@@ -540,7 +539,10 @@ def _render_inbox_list(messages: list, status_rows: dict[str, str]) -> list[str]
         for message in messages
     ]
     disabled_columns = [column for column in table_rows[0] if column not in {"Select"}]
-    st.warning("Inbox preview only. Use Extract Selected Emails first, then use Export Customer Excel below.")
+    st.warning(
+        "Preview/raw mailbox data only — this table is not the Customer Excel report. "
+        "Use Extract Selected Emails, then Download Customer Excel below."
+    )
     edited = st.data_editor(
         pd.DataFrame(table_rows),
         hide_index=True,
@@ -594,16 +596,16 @@ def _update_selected_outlook_messages(messages: list, select_all: bool) -> list[
     return selected_ids
 
 
-def _render_excel_export(user_id: str, label: str = "Export to Excel") -> None:
+def _render_excel_export(user_id: str, label: str = "Download Customer Excel") -> None:
     """Render Outlook registry Excel export button."""
-    page = get_customer_page(user_id, page=1, page_size=1)
+    page = get_customer_page(user_id, page=1, page_size=1, source="Outlook")
     if not page["rows"]:
         st.button(label, disabled=True, use_container_width=True)
-        st.caption("Extract customer information first to enable the customer report.")
+        st.caption("Extract customer emails first to enable Excel download.")
         return
     export_path = None
     try:
-        export_path = create_large_excel_export(user_id)
+        export_path = create_large_excel_export(user_id, source="Outlook")
         data = export_path.read_bytes()
     finally:
         if export_path is not None:
@@ -656,6 +658,9 @@ def _import_messages(user_id: str, messages: list, message_ids: list[str]) -> No
                 elif result.status == "Incomplete":
                     summary["incomplete_records"] += 1
                     summary["customers_extracted"] += 1
+                    imported_ids.add(message_id)
+                elif result.status == "Skipped Internal":
+                    summary["duplicates_skipped"] += 1
                     imported_ids.add(message_id)
                 elif result.status == "Failed":
                     summary["failed_records"] += 1
@@ -743,7 +748,7 @@ def _render_import_result() -> None:
 
 def _render_customer_preview(user_id: str) -> None:
     """Render extracted Outlook customers below the inbox."""
-    st.subheader("Review Extracted Records")
+    st.subheader("Customer Records")
     page = get_customer_page(user_id, page=1, page_size=50, source="Outlook", status="", search="", sort_by="created_at")
     rows = page["rows"]
     if not rows:

@@ -109,6 +109,9 @@ def test_inbox_preview_columns_never_become_customer_export_columns() -> None:
 
 def test_outlook_page_labels_inbox_as_preview_and_customer_export() -> None:
     source = (Path(__file__).resolve().parents[1] / "pages" / "Outlook Connector.py").read_text(encoding="utf-8")
-    assert "Inbox Preview — Not Customer Report" in source
-    assert "Export Customer Excel" in source
-    assert "Extract customer information first to enable the customer report." in source
+    assert "Inbox Preview — Select Emails for Extraction" in source
+    assert "Preview/raw mailbox data only" in source
+    assert "Customer Records" in source
+    assert "Download Customer Excel" in source
+    assert "Extract customer emails first to enable Excel download." in source
+    assert 'create_large_excel_export(user_id, source="Outlook")' in source

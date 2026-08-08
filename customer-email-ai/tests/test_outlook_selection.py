@@ -5,6 +5,8 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 from models import OutlookMessage
 
 
@@ -104,3 +106,99 @@ def test_import_skips_duplicate_message_ids(monkeypatch) -> None:
 
     assert process_calls == []
     assert FakeStreamlit.session_state["outlook_import_summary"]["duplicates_skipped"] == 1
+
+
+def test_selected_email_extraction_processes_and_reports_saved_customer(monkeypatch) -> None:
+    class Progress:
+        def progress(self, _value):
+            return None
+
+    class FakeStreamlit:
+        session_state = SessionStateMock()
+
+        @staticmethod
+        def subheader(*_args, **_kwargs):
+            return None
+
+        @staticmethod
+        def progress(_value):
+            return Progress()
+
+    class Result:
+        status = "Unique"
+
+    monkeypatch.setattr(PAGE, "st", FakeStreamlit)
+    processed = []
+    monkeypatch.setattr(
+        PAGE,
+        "process_outlook_message",
+        lambda user_id, message: processed.append((user_id, message.message_id)) or Result(),
+    )
+
+    PAGE._import_messages("user", [_message("selected")], ["selected"])
+
+    assert processed == [("user", "selected")]
+    assert FakeStreamlit.session_state["outlook_import_summary"] == {
+        "selected_emails": 1,
+        "emails_processed": 1,
+        "customers_extracted": 1,
+        "duplicates_skipped": 0,
+        "incomplete_records": 0,
+        "failed_records": 0,
+    }
+
+
+def test_internal_email_is_not_reported_as_extracted_customer(monkeypatch) -> None:
+    class Progress:
+        def progress(self, _value):
+            return None
+
+    class FakeStreamlit:
+        session_state = SessionStateMock()
+
+        @staticmethod
+        def subheader(*_args, **_kwargs):
+            return None
+
+        @staticmethod
+        def progress(_value):
+            return Progress()
+
+    class Result:
+        status = "Skipped Internal"
+
+    monkeypatch.setattr(PAGE, "st", FakeStreamlit)
+    monkeypatch.setattr(PAGE, "process_outlook_message", lambda *_args: Result())
+
+    PAGE._import_messages("user", [_message("internal")], ["internal"])
+
+    summary = FakeStreamlit.session_state["outlook_import_summary"]
+    assert summary["customers_extracted"] == 0
+    assert summary["duplicates_skipped"] == 1
+
+
+def test_customer_excel_is_disabled_when_no_processed_outlook_records(monkeypatch) -> None:
+    calls = []
+
+    class FakeStreamlit:
+        @staticmethod
+        def button(label, **kwargs):
+            calls.append(("button", label, kwargs))
+
+        @staticmethod
+        def caption(message):
+            calls.append(("caption", message, {}))
+
+    monkeypatch.setattr(PAGE, "st", FakeStreamlit)
+    monkeypatch.setattr(
+        PAGE,
+        "get_customer_page",
+        lambda user_id, **kwargs: calls.append(("query", user_id, kwargs)) or {"rows": []},
+    )
+    monkeypatch.setattr(PAGE, "create_large_excel_export", lambda *_args, **_kwargs: pytest.fail("empty state must not export"))
+
+    PAGE._render_excel_export("user")
+
+    assert ("query", "user", {"page": 1, "page_size": 1, "source": "Outlook"}) in calls
+    assert ("button", "Download Customer Excel", {"disabled": True, "use_container_width": True}) in calls
+    assert ("caption", "Extract customer emails first to enable Excel download.", {}) in calls

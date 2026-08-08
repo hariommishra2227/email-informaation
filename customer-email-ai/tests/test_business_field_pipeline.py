@@ -101,6 +101,21 @@ def test_excel_and_csv_have_exact_business_schema(isolated_db: None) -> None:
         cleanup_export(csv_path)
 
 
+def test_customer_excel_exports_multiple_processed_outlook_records_only(isolated_db: None) -> None:
+    database.insert_customer(CustomerRecord(user_id="u", email="one@example.com", source="Outlook"))
+    database.insert_customer(CustomerRecord(user_id="u", email="two@example.com", source="Outlook"))
+    database.insert_customer(CustomerRecord(user_id="u", email="manual@example.com", source="Manual"))
+
+    excel_path = create_large_excel_export("u", source="Outlook")
+    try:
+        rows = list(load_workbook(excel_path, read_only=True).active.values)
+    finally:
+        cleanup_export(excel_path)
+
+    assert rows[0] == tuple(HEADERS)
+    assert [row[2] for row in rows[1:]] == ["one@example.com", "two@example.com"]
+
+
 def test_file_database_does_not_reuse_prior_in_memory_state(
     isolated_db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
