@@ -52,11 +52,14 @@ def test_export_customers_to_excel() -> None:
 
     worksheet = workbook[WORKSHEET_NAME]
     assert worksheet.max_row == 21
-    assert worksheet.max_column == 4
+    assert worksheet.max_column == 5
     assert worksheet.freeze_panes == "A2"
-    assert [cell.value for cell in worksheet[1]] == ["Customer Name", "Contact Mail", "Location", "Sender"]
+    assert [cell.value for cell in worksheet[1]] == [
+        "Customer Name", "Contact Mail", "Contact No", "Location", "Sender",
+    ]
     assert worksheet["B2"].value == "customer1@example.com"
-    assert worksheet["D2"].value == "Sender 1"
+    assert worksheet["C2"].value == "+91 9876543201"
+    assert worksheet["E2"].value == "Sender 1"
     assert worksheet["A1"].font.bold is True
     assert worksheet["A1"].fill.fgColor.rgb == "00D9EAF7"
     assert worksheet["A2"].fill.fgColor.rgb == "00F7FBFF"

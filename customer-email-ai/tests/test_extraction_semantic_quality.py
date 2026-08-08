@@ -100,7 +100,7 @@ def test_inbox_preview_columns_never_become_customer_export_columns() -> None:
     }
     workbook = load_workbook(export_customers_to_excel([raw_inbox_row]), read_only=True)
     rows = list(workbook.active.values)
-    assert list(rows[0]) == ["Customer Name", "Contact Mail", "Location", "Sender"]
+    assert list(rows[0]) == ["Customer Name", "Contact Mail", "Contact No", "Location", "Sender"]
     assert "Select" not in rows[0]
     assert False not in rows[1]
     assert not {"Subject", "Received", "Status", "Processing", "Attachment", "Message ID"} & set(rows[0])
