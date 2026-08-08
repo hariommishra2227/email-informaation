@@ -504,29 +504,60 @@ def _render_inbox_list(messages: list, status_rows: dict[str, str]) -> list[str]
     st.subheader("Inbox Preview — Select Emails for Extraction")
     if not messages:
         st.info("No emails found for the selected filters.")
-        st.session_state["selected_outlook_messages"] = []
-        st.session_state["outlook_selected_messages"] = []
+        _set_selected_message_ids([])
+        _reset_selection_editor()
+        st.session_state["outlook_displayed_message_ids"] = ()
         return []
 
+    st.subheader("Select Emails")
+    selected_message_ids = reconcile_displayed_selection(messages)
     action_cols = st.columns(2)
     with action_cols[0]:
         select_all_clicked = st.button("Select All Emails", key="select_all_loaded_outlook", use_container_width=True)
     with action_cols[1]:
         clear_clicked = st.button("Clear All", key="clear_outlook_selection", use_container_width=True)
     if select_all_clicked:
-        st.session_state.pop("outlook_message_selection_table", None)
         selected_message_ids = select_all_loaded_message_ids(messages)
+        _reset_selection_editor()
         st.success(f"{len(selected_message_ids)} visible emails selected.")
     elif clear_clicked:
-        st.session_state.pop("outlook_message_selection_table", None)
         selected_message_ids = clear_selected_message_ids()
+        _reset_selection_editor()
         st.success("Selection cleared.")
-    else:
-        selected_message_ids = _selected_message_ids()
-    selected_message_ids = st.session_state.get("selected_outlook_messages", [])
-    table_rows = [
+
+    selection_counter = st.empty()
+    selection_counter.caption(_selected_count_text(selected_message_ids, messages))
+    table_rows = _selection_table_rows(messages, status_rows, selected_message_ids)
+    disabled_columns = [column for column in table_rows[0] if column != "Select"]
+    st.warning(
+        "Preview/raw mailbox data only — this table is not the Customer Excel report. "
+        "Use Extract Selected Emails, then Download Customer Excel below."
+    )
+    editor_version = int(st.session_state.get("outlook_selection_editor_version", 0))
+    edited = st.data_editor(
+        pd.DataFrame(table_rows),
+        hide_index=True,
+        use_container_width=True,
+        key=f"outlook_message_selection_table_{editor_version}",
+        disabled=disabled_columns,
+        column_config={
+            "Select": st.column_config.CheckboxColumn("Select"),
+            "Message ID": st.column_config.TextColumn("Message ID", disabled=True),
+        },
+    )
+    selected_ids = unique_message_ids(edited.loc[edited["Select"], "Message ID"].tolist() if not edited.empty else [])
+    _set_selected_message_ids(selected_ids)
+    selection_counter.caption(_selected_count_text(selected_ids, messages))
+    st.caption(f"{len(messages)} fetched. Status is refreshed after extraction.")
+    return selected_ids
+
+
+def _selection_table_rows(messages: list, status_rows: dict[str, str], selected_ids: list[str]) -> list[dict]:
+    """Build inbox editor rows from the canonical selected message IDs."""
+    selected = set(selected_ids)
+    return [
         {
-            "Select": message.message_id in selected_message_ids,
+            "Select": message.message_id in selected,
             "Sender": message.sender_name,
             "Sender Email": message.sender_email,
             "Subject": message.subject,
@@ -538,26 +569,40 @@ def _render_inbox_list(messages: list, status_rows: dict[str, str]) -> list[str]
         }
         for message in messages
     ]
-    disabled_columns = [column for column in table_rows[0] if column not in {"Select"}]
-    st.warning(
-        "Preview/raw mailbox data only — this table is not the Customer Excel report. "
-        "Use Extract Selected Emails, then Download Customer Excel below."
-    )
-    edited = st.data_editor(
-        pd.DataFrame(table_rows),
-        hide_index=True,
-        use_container_width=True,
-        key="outlook_message_selection_table",
-        disabled=disabled_columns,
-        column_config={
-            "Select": st.column_config.CheckboxColumn("Select"),
-            "Message ID": st.column_config.TextColumn("Message ID", disabled=True),
-        },
-    )
-    selected_ids = unique_message_ids(edited.loc[edited["Select"], "Message ID"].tolist() if not edited.empty else [])
+
+
+def _selected_count_text(selected_ids: list[str], messages: list) -> str:
+    """Return the displayed selection counter text."""
+    return f"Selected: {len(selected_ids)} of {len(messages)}"
+
+
+def _set_selected_message_ids(selected_ids: list[str]) -> list[str]:
+    """Store one canonical, ordered selection for the editor and extraction."""
+    selected_ids = unique_message_ids(selected_ids)
     st.session_state["selected_outlook_messages"] = selected_ids
     st.session_state["outlook_selected_messages"] = selected_ids
-    st.caption(f"{len(messages)} fetched. {len(selected_ids)} selected. Status is refreshed after extraction.")
+    return selected_ids
+
+
+def _reset_selection_editor() -> None:
+    """Use a fresh data-editor widget so programmatic checkbox values render."""
+    current = int(st.session_state.get("outlook_selection_editor_version", 0))
+    st.session_state["outlook_selection_editor_version"] = current + 1
+
+
+def reconcile_displayed_selection(messages: list) -> list[str]:
+    """Remove stale/filtered IDs and reset the editor when displayed rows change."""
+    displayed_ids = tuple(unique_message_ids([message.message_id for message in messages]))
+    previous_ids = tuple(st.session_state.get("outlook_displayed_message_ids", ()))
+    selected_ids = [
+        message_id for message_id in st.session_state.get("selected_outlook_messages", [])
+        if message_id in displayed_ids
+    ]
+    stale_selection_removed = selected_ids != list(st.session_state.get("selected_outlook_messages", []))
+    _set_selected_message_ids(selected_ids)
+    if displayed_ids != previous_ids or stale_selection_removed:
+        _reset_selection_editor()
+    st.session_state["outlook_displayed_message_ids"] = displayed_ids
     return selected_ids
 
 
@@ -569,31 +614,17 @@ def unique_message_ids(message_ids: list[str]) -> list[str]:
 def select_all_loaded_message_ids(messages: list) -> list[str]:
     """Select only the currently loaded/visible messages, regardless of read state."""
     selected_ids = unique_message_ids([message.message_id for message in messages])
-    st.session_state["selected_outlook_messages"] = selected_ids
-    st.session_state["outlook_selected_messages"] = selected_ids
-    return selected_ids
+    return _set_selected_message_ids(selected_ids)
 
 
 def clear_selected_message_ids() -> list[str]:
     """Clear the central selection state without fetching or extracting messages."""
-    st.session_state["selected_outlook_messages"] = []
-    st.session_state["outlook_selected_messages"] = []
-    return []
+    return _set_selected_message_ids([])
 
 
 def _update_selected_outlook_messages(messages: list, select_all: bool) -> list[str]:
-    """Update selection state using only the messages currently loaded in the UI."""
-    current_ids = [message.message_id for message in messages]
-    selected_ids = list(st.session_state.get("selected_outlook_messages", []))
-    previous_select_all = bool(st.session_state.get("previous_select_all_outlook_messages", False))
-    if select_all:
-        selected_ids = list(dict.fromkeys(selected_ids + current_ids))
-    elif previous_select_all:
-        selected_ids = []
-    st.session_state["previous_select_all_outlook_messages"] = select_all
-    st.session_state["selected_outlook_messages"] = selected_ids
-    st.session_state["outlook_selected_messages"] = selected_ids
-    return selected_ids
+    """Compatibility helper for selecting or clearing the displayed messages."""
+    return select_all_loaded_message_ids(messages) if select_all else clear_selected_message_ids()
 
 
 def _render_excel_export(user_id: str, label: str = "Download Customer Excel") -> None:
