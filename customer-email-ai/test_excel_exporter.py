@@ -29,6 +29,8 @@ def build_sample_customers() -> list[dict[str, object]]:
                 "input_source": "PDF" if index % 2 else "Manual Paste",
                 "designation": "Manager" if index % 2 else "Director",
                 "address": f"{index} Market Street, City",
+                "location": "City",
+                "sender_name": f"Sender {index}",
                 "subject": f"Quotation Request {index}",
                 "extraction_confidence": 100,
                 "duplicate_status": status,
@@ -50,18 +52,16 @@ def test_export_customers_to_excel() -> None:
 
     worksheet = workbook[WORKSHEET_NAME]
     assert worksheet.max_row == 21
-    assert worksheet.max_column == 8
+    assert worksheet.max_column == 4
     assert worksheet.freeze_panes == "A2"
-    assert [cell.value for cell in worksheet[1]] == [
-        "Client Name", "Contact Person Name", "Contact Email", "Phone Number",
-        "Full Address", "Location", "Subject", "Email Date",
-    ]
-    assert worksheet["D2"].value == "+91 9876543201"
+    assert [cell.value for cell in worksheet[1]] == ["Customer Name", "Contact Mail", "Location", "Sender"]
+    assert worksheet["B2"].value == "customer1@example.com"
+    assert worksheet["D2"].value == "Sender 1"
     assert worksheet["A1"].font.bold is True
     assert worksheet["A1"].fill.fgColor.rgb == "00D9EAF7"
     assert worksheet["A2"].fill.fgColor.rgb == "00F7FBFF"
     assert worksheet["A3"].fill.fgColor.rgb == "00FFFFFF"
-    assert worksheet.column_dimensions["A"].width > len("Client Name")
+    assert worksheet.column_dimensions["A"].width > len("Customer Name")
 
 
 def main() -> None:

@@ -15,14 +15,10 @@ EXCEL_FILE_NAME = "customer_report.xlsx"
 WORKSHEET_NAME = "Customer Report"
 
 COLUMN_MAPPING = {
-    "Client Name": "Client Name",
-    "Contact Person Name": "Contact Person Name",
-    "Contact Email": "Contact Email",
-    "Phone Number": "Phone Number",
-    "Full Address": "Full Address",
+    "Customer Name": "Customer Name",
+    "Contact Mail": "Contact Mail",
     "Location": "Location",
-    "Subject": "Subject",
-    "Email Date": "Email Date",
+    "Sender": "Sender",
 }
 
 HEADER_FILL = PatternFill(fill_type="solid", fgColor="D9EAF7")
@@ -36,14 +32,10 @@ def _build_export_rows(customers: list[dict[str, Any]]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
 
     aliases = {
-        "Client Name": ("Client Name", "organisation", "organisation_name"),
-        "Contact Person Name": ("Contact Person Name", "contact_name", "contact_person_name"),
-        "Contact Email": ("Contact Email", "email", "email_id"),
-        "Phone Number": ("Phone Number", "mobile", "mobile_number"),
-        "Full Address": ("Full Address", "address"),
+        "Customer Name": ("Customer Name", "organisation", "organisation_name"),
+        "Contact Mail": ("Contact Mail", "email", "email_id"),
         "Location": ("Location", "location"),
-        "Subject": ("Subject", "subject"),
-        "Email Date": ("Email Date", "email_date"),
+        "Sender": ("Sender", "sender_name"),
     }
 
     for customer in customers:
