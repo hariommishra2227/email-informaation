@@ -197,19 +197,22 @@ MICROSOFT_REDIRECT_URI = _first_value(
 
 AZURE_CLIENT_ID = _secret_value("AZURE_CLIENT_ID", "").strip()
 AZURE_CLIENT_SECRET = _secret_value("AZURE_CLIENT_SECRET", "").strip()
-AZURE_REDIRECT_URI = _secret_value(
-    "AZURE_REDIRECT_URI",
-    "http://localhost:8501",
-).strip()
+AZURE_TENANT_ID_VALUE = _secret_value("AZURE_TENANT_ID", "").strip()
+AZURE_REDIRECT_URI = _secret_value("AZURE_REDIRECT_URI", "").strip()
 AZURE_AUTHORITY = _secret_value(
     "AZURE_AUTHORITY",
     "https://login.microsoftonline.com/common",
 ).strip()
 
-RESOLVED_CLIENT_ID = AZURE_CLIENT_ID or MICROSOFT_CLIENT_ID
-RESOLVED_CLIENT_SECRET = AZURE_CLIENT_SECRET or MICROSOFT_CLIENT_SECRET
-RESOLVED_TENANT_ID = MICROSOFT_TENANT_ID
-RESOLVED_REDIRECT_URI = AZURE_REDIRECT_URI or MICROSOFT_REDIRECT_URI
+def _resolve_alias(azure_value: str, microsoft_value: str, default: str = "") -> str:
+    """Prefer the documented Azure alias, then Microsoft compatibility name."""
+    return str(azure_value or "").strip() or str(microsoft_value or "").strip() or default
+
+
+RESOLVED_CLIENT_ID = _resolve_alias(AZURE_CLIENT_ID, MICROSOFT_CLIENT_ID)
+RESOLVED_CLIENT_SECRET = _resolve_alias(AZURE_CLIENT_SECRET, MICROSOFT_CLIENT_SECRET)
+RESOLVED_TENANT_ID = _resolve_alias(AZURE_TENANT_ID_VALUE, MICROSOFT_TENANT_ID)
+RESOLVED_REDIRECT_URI = _resolve_alias(AZURE_REDIRECT_URI, MICROSOFT_REDIRECT_URI, "http://localhost:8501")
 RESOLVED_AUTHORITY = (
     f"https://login.microsoftonline.com/{RESOLVED_TENANT_ID}"
     if RESOLVED_TENANT_ID
