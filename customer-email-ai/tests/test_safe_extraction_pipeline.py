@@ -29,9 +29,9 @@ def test_po_and_free_email_are_not_mobile_or_organisation():
     assert result["organisation_name"] == ""
 
 
-def test_business_domain_can_supply_organisation():
+def test_business_domain_without_evidence_does_not_guess_organisation():
     result = EmailExtractionEngine().extract("Hello", graph_sender_email="person@northwind.example")
-    assert result["organisation_name"] == "Northwind"
+    assert result["organisation_name"] == ""
 
 
 def test_designation_requires_latest_signature():

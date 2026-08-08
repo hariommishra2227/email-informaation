@@ -76,7 +76,12 @@ def render(user_id: str) -> None:
         return
 
     try:
-        refresh_clicked, import_selected_clicked, import_unread_clicked, sync_clicked = _render_quick_actions(user_id)
+        extraction_enabled = folder not in {"Sent Items", "Drafts"}
+        refresh_clicked, import_selected_clicked, import_unread_clicked, sync_clicked = _render_quick_actions(
+            user_id, extraction_enabled=extraction_enabled
+        )
+        if not extraction_enabled:
+            st.info(f"{folder} is preview-only. Customer extraction is disabled because the external customer cannot be identified safely from the internal sender.")
     except Exception as exc:
         LOGGER.exception("Outlook quick actions failed to render.")
         st.error(_safe_render_exception_message(exc, "Outlook quick actions"))
@@ -136,6 +141,8 @@ def render(user_id: str) -> None:
     st.write("")
     try:
         _render_customer_preview(user_id)
+        st.subheader("Customer Report")
+        _render_excel_export(user_id, label="Export Customer Excel")
     except Exception as exc:
         LOGGER.exception("Outlook customer preview failed to render.")
         st.error(_safe_render_exception_message(exc, "Outlook customer preview"))
@@ -322,20 +329,18 @@ def _render_login_url_diagnostics(exc: Exception) -> None:
             st.write(f"**{label}:** {value}")
 
 
-def _render_quick_actions(user_id: str) -> tuple[bool, bool, bool, bool]:
+def _render_quick_actions(user_id: str, *, extraction_enabled: bool = True) -> tuple[bool, bool, bool, bool]:
     """Render the business workflow action row."""
     st.subheader("Inbox Emails")
-    action_cols = st.columns([0.2, 0.2, 0.2, 0.2, 0.2])
+    action_cols = st.columns(4)
     with action_cols[0]:
         refresh_clicked = st.button("Refresh Inbox", type="primary", use_container_width=True)
     with action_cols[1]:
-        import_selected_clicked = st.button("Extract Selected Emails", use_container_width=True)
+        import_selected_clicked = st.button("Extract Selected Emails", disabled=not extraction_enabled, use_container_width=True)
     with action_cols[2]:
-        import_unread_clicked = st.button("Extract All Unread", use_container_width=True)
+        import_unread_clicked = st.button("Extract All Unread", disabled=not extraction_enabled, use_container_width=True)
     with action_cols[3]:
         sync_clicked = st.button("Sync New Emails", use_container_width=True)
-    with action_cols[4]:
-        _render_excel_export(user_id, label="Export Excel")
     return refresh_clicked, import_selected_clicked, import_unread_clicked, sync_clicked
 
 
@@ -440,7 +445,8 @@ def _render_filters() -> tuple[str, str, tuple[date, date] | list, int, str, boo
     with controls[2]:
         limit = int(st.number_input("Maximum Emails", min_value=10, max_value=5000, value=100, step=10))
     with controls[3]:
-        skip_internal = st.checkbox("Skip Internal Emails", value=True)
+        skip_internal = st.checkbox("Hide Internal Emails from Inbox Preview", value=True)
+        st.caption("Internal ITSIPL senders are always skipped during customer extraction.")
     search_text = st.text_input("Search sender or subject", "")
     custom_dates: tuple[date, date] | tuple = ()
     if date_filter == "Custom Date Range":
@@ -496,7 +502,7 @@ def _filter_messages(messages: list, search_text: str, date_filter: str, date_ra
 
 def _render_inbox_list(messages: list, status_rows: dict[str, str]) -> list[str]:
     """Render selectable inbox rows and return selected message ids."""
-    st.subheader("Select Emails")
+    st.subheader("Inbox Preview — Not Customer Report")
     if not messages:
         st.info("No emails found for the selected filters.")
         st.session_state["selected_outlook_messages"] = []
@@ -534,6 +540,7 @@ def _render_inbox_list(messages: list, status_rows: dict[str, str]) -> list[str]
         for message in messages
     ]
     disabled_columns = [column for column in table_rows[0] if column not in {"Select"}]
+    st.warning("Inbox preview only. Use Extract Selected Emails first, then use Export Customer Excel below.")
     edited = st.data_editor(
         pd.DataFrame(table_rows),
         hide_index=True,
@@ -592,6 +599,7 @@ def _render_excel_export(user_id: str, label: str = "Export to Excel") -> None:
     page = get_customer_page(user_id, page=1, page_size=1)
     if not page["rows"]:
         st.button(label, disabled=True, use_container_width=True)
+        st.caption("Extract customer information first to enable the customer report.")
         return
     export_path = None
     try:
@@ -743,20 +751,6 @@ def _render_customer_preview(user_id: str) -> None:
         return
     preview = pd.DataFrame([to_business_output(row) for row in rows], columns=BUSINESS_COLUMNS)
     st.dataframe(preview, hide_index=True, use_container_width=True)
-    export_path = None
-    try:
-        export_path = create_large_excel_export(user_id)
-        data = export_path.read_bytes()
-    finally:
-        if export_path is not None:
-            cleanup_export(export_path)
-    st.download_button(
-        "Download Excel Report",
-        data=data,
-        file_name=EXCEL_FILE_NAME,
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
-    )
 
 
 def _friendly_exception_message(exc: Exception) -> str:
