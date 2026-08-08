@@ -17,6 +17,7 @@ WORKSHEET_NAME = "Customer Report"
 COLUMN_MAPPING = {
     "Customer Name": "Customer Name",
     "Contact Mail": "Contact Mail",
+    "Contact No": "Contact No",
     "Location": "Location",
     "Sender": "Sender",
 }
@@ -34,6 +35,7 @@ def _build_export_rows(customers: list[dict[str, Any]]) -> list[dict[str, Any]]:
     aliases = {
         "Customer Name": ("Customer Name", "organisation", "organisation_name"),
         "Contact Mail": ("Contact Mail", "email", "email_id"),
+        "Contact No": ("Contact No", "mobile", "mobile_number"),
         "Location": ("Location", "location"),
         "Sender": ("Sender", "sender_name"),
     }

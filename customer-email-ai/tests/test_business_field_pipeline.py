@@ -12,13 +12,13 @@ import config
 from duplicate_handler import customer_record_to_contact
 from models import CustomerRecord, OutlookMessage
 from repository import EmailSyncRepository
-from services.email_processor import build_customer_record
+from services.email_processor import build_customer_record, process_outlook_message
 from services.export_service import cleanup_export, create_large_csv_export, create_large_excel_export
 from storage import database
 from sync import OutlookMailboxSyncService
 
 
-HEADERS = ["Customer Name", "Contact Mail", "Location", "Sender"]
+HEADERS = ["Customer Name", "Contact Mail", "Contact No", "Location", "Sender"]
 
 
 @pytest.fixture()
@@ -89,7 +89,10 @@ def test_conversion_repository_and_merge_preserve_business_fields(isolated_db: N
 
 
 def test_excel_and_csv_have_exact_business_schema(isolated_db: None) -> None:
-    database.insert_customer(CustomerRecord(user_id="u", email="a@example.com", location="Pune", subject="S", email_date="D"))
+    database.insert_customer(CustomerRecord(
+        user_id="u", email="a@example.com", mobile="+91 98765 43210", location="Pune",
+        subject="S", email_date="D",
+    ))
     excel_path = create_large_excel_export("u")
     csv_path = create_large_csv_export("u")
     try:
@@ -101,13 +104,28 @@ def test_excel_and_csv_have_exact_business_schema(isolated_db: None) -> None:
         cleanup_export(csv_path)
 
 
+def test_outlook_phone_and_location_survive_database_persistence(isolated_db: None) -> None:
+    message = OutlookMessage(
+        message_id="contact-location", user_id="u", sender_name="A Person",
+        sender_email="person@example.com", subject="Enquiry",
+        body="Company: Example Ltd\nMobile: +91-98765-43210\nOffice: Noida, Uttar Pradesh",
+        received_datetime="2026-08-08T10:00:00Z", is_read=False,
+    )
+
+    process_outlook_message("u", message)
+
+    row = database.list_customers("u")[0]
+    assert row["mobile"] == "+91-98765-43210"
+    assert row["location"] == "Noida, Uttar Pradesh"
+
+
 def test_customer_excel_exports_multiple_processed_outlook_records_only(isolated_db: None) -> None:
     database.insert_customer(CustomerRecord(
-        user_id="u", email="one@example.com", organisation="One Ltd", location="Pune",
+        user_id="u", email="one@example.com", mobile="+91 98765 00001", organisation="One Ltd", location="Pune",
         sender_name="One Sender", source="Outlook",
     ))
     database.insert_customer(CustomerRecord(
-        user_id="u", email="two@example.com", organisation="Two Ltd", location="Mumbai",
+        user_id="u", email="two@example.com", mobile="+91 98765 00002", organisation="Two Ltd", location="Mumbai",
         sender_name="Two Sender", source="Outlook",
     ))
     database.insert_customer(CustomerRecord(user_id="u", email="manual@example.com", source="Manual"))
@@ -120,8 +138,8 @@ def test_customer_excel_exports_multiple_processed_outlook_records_only(isolated
 
     assert rows[0] == tuple(HEADERS)
     assert rows[1:] == [
-        ("One Ltd", "one@example.com", "Pune", "One Sender"),
-        ("Two Ltd", "two@example.com", "Mumbai", "Two Sender"),
+        ("One Ltd", "one@example.com", "+91 98765 00001", "Pune", "One Sender"),
+        ("Two Ltd", "two@example.com", "+91 98765 00002", "Mumbai", "Two Sender"),
     ]
 
 

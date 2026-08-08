@@ -70,14 +70,8 @@ COMPANY_HINT_KEYWORDS = (
     "organization",
     "organisation",
 )
-PHONE_LABEL_KEYWORDS = (
-    "mobile",
-    "phone",
-    "contact",
-    "tel",
-    "telephone",
-    "cell",
-    "whatsapp",
+PHONE_LABEL_PATTERN = re.compile(
+    r"(?i)^\s*(?:mobile|mob|phone(?:\s+no)?|contact(?:\s+no)?|tel|telephone|m|t)\s*:"
 )
 PHONE_DISPLAY_CLEANUP_PATTERN = re.compile(r"\s+")
 NORMALIZED_PHONE_PATTERN = re.compile(r"\D")
@@ -433,8 +427,7 @@ class EmailExtractionEngine:
 
     def _line_has_phone_label(self, line: str) -> bool:
         """Return whether a line contains a customer contact label."""
-        lowered_line = line.lower()
-        return any(keyword in lowered_line for keyword in PHONE_LABEL_KEYWORDS)
+        return bool(PHONE_LABEL_PATTERN.match(line))
 
     def _line_has_non_phone_signal(self, line: str) -> bool:
         """Return whether a line likely contains an ID, date, PIN, or invoice value."""
@@ -478,7 +471,14 @@ class EmailExtractionEngine:
                     continue
                 normalized = self._normalize_phone_number(candidate)
                 digits = re.sub(r"\D", "", candidate)
-                if normalized and (not digits.startswith("91") and not (len(digits) == 10 and digits[:1] not in "6789") or digits[-10:][:1] in "6789"):
+                labelled_landline = self._line_has_phone_label(context) and bool(
+                    re.fullmatch(r"0\d{2,4}[\s.-]?\d{6,8}", candidate.strip())
+                )
+                if (normalized or labelled_landline) and (
+                    labelled_landline
+                    or not digits.startswith("91") and not (len(digits) == 10 and digits[:1] not in "6789")
+                    or digits[-10:][:1] in "6789"
+                ):
                     display_numbers.append(self._format_phone_number_for_display(candidate))
 
             return list(dict.fromkeys(display_numbers))
@@ -710,15 +710,41 @@ class EmailExtractionEngine:
     def extract_location(self, text: str, address: str = "") -> str:
         """Extract location only from explicit labels or strong postal structure."""
         for line in self._iter_lines(text):
-            match = re.match(r"(?i)^(?:location|city)\s*:\s*([A-Za-z][A-Za-z .'-]{1,80})$", line)
+            match = re.match(
+                r"(?i)^(?:location|city|office|address|registered\s+office|corporate\s+office)\s*:\s*(.{2,160})$",
+                line,
+            )
             if match:
-                return match.group(1).strip(" ,.-")
+                location = self._location_from_address_value(match.group(1))
+                if location:
+                    return location
         source = address or text
         match = re.search(
             r"(?i)(?:^|,|\n)\s*([A-Za-z][A-Za-z .'-]{1,60})\s*-\s*(?:India|USA|United States|UK|United Kingdom)\s*-\s*\d{3}[\s-]?\d{3}\b",
             source,
         )
-        return self._clean_text(match.group(1)).strip(" ,.-") if match else ""
+        if match:
+            return self._clean_text(match.group(1)).strip(" ,.-")
+        return self._location_from_address_value(address) if address else ""
+
+    def _location_from_address_value(self, value: str) -> str:
+        """Return an explicit city/state value without guessing from unrelated text."""
+        value = self._clean_text(value).strip(" ,;.-")
+        if not value or EMAIL_PATTERN.search(value) or re.search(r"https?://", value, re.I):
+            return ""
+        value = re.sub(r"(?i)\s*,?\s*(?:India|USA|United States|UK|United Kingdom)\s*$", "", value)
+        value = re.sub(r"\s+\d{3}[\s-]?\d{3}\s*$", "", value).strip(" ,;.-")
+        parts = [part.strip(" ,;.-") for part in value.split(",") if part.strip(" ,;.-")]
+        if not parts:
+            return ""
+        if len(parts) == 1:
+            return parts[0] if re.fullmatch(r"[A-Za-z][A-Za-z .'-]{1,80}", parts[0]) else ""
+        city, state = parts[-2:]
+        if re.fullmatch(r"[A-Za-z][A-Za-z .'-]{1,80}", city) and re.fullmatch(
+            r"[A-Za-z][A-Za-z .'-]{1,80}", state
+        ):
+            return f"{city}, {state}"
+        return ""
 
     def _valid_postal_address(self, value: str) -> bool:
         """Accept only address-like text, never labels or disclaimer sentences."""

@@ -7,7 +7,7 @@ from typing import Any
 from models import CustomerRecord
 from storage import database
 
-BUSINESS_COLUMNS = ("Customer Name", "Contact Mail", "Location", "Sender")
+BUSINESS_COLUMNS = ("Customer Name", "Contact Mail", "Contact No", "Location", "Sender")
 
 
 def save_customer(customer: CustomerRecord) -> int:
@@ -70,6 +70,7 @@ def to_business_output(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "Customer Name": row.get("organisation", ""),
         "Contact Mail": row.get("email", ""),
+        "Contact No": row.get("mobile", ""),
         "Location": row.get("location", ""),
         "Sender": row.get("sender_name", ""),
     }
